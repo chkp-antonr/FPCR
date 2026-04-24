@@ -1,0 +1,61 @@
+# Mock data file for FPCR WebUI testing
+# When MOCK_DATA=mock_data.yaml is set in .env, the WebUI uses this data
+# instead of connecting to Check Point API.
+
+# Hostname mappings for testing hostname display in predictions
+hosts:
+  USNY-CORP-WST-1: 10.76.64.10
+  AMUS-WEB-SRV: 10.76.67.10
+  EMLD-WEB-SRV: 10.76.131.10
+  APTON-CORP-WST1: 10.76.192.10
+
+
+domains:
+  AME_CORP:
+    policies:
+      US-NY-CORP:
+        firewalls:
+          USNY-CORP-FW-1:
+            subnets:
+              - 10.76.64.0/24
+        sections:
+          init: 3
+          ingress: 5
+          egress: 5
+          cleanup: 2
+  AME_DC:
+    policies:
+      US-NY-DC:
+        firewalls:
+          USNY-DC-FW-1:
+            subnets:
+              - 10.76.67.0/24
+        sections:
+          init: 4
+          ingress: 4
+          egress: 6
+          cleanup: 1
+  EMEA_DC:
+    policies:
+      UK-LN-DC:
+        firewalls:
+          EMLD-DC-FW-1:
+            subnets:
+              - 10.76.131.0/24
+        sections:
+          init: 2
+          ingress: 3
+          egress: 4
+          cleanup: 1
+  APA_CORP:
+    policies:
+      JP-TOK-CORP:
+        firewalls:
+          APTOK-CORP-FW-1:
+            subnets:
+              - 10.76.192.0/24
+        sections:
+          init: 4
+          ingress: 3
+          egress: 4
+          cleanup: 1

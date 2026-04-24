@@ -1,0 +1,85 @@
+.loginContainer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background: var(--grad-header);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Background blob for extra flair */
+.loginContainer::before {
+  content: '';
+  position: absolute;
+  width: 600px;
+  height: 600px;
+  background: var(--grad-premium);
+  filter: blur(80px);
+  opacity: 0.15;
+  top: -100px;
+  right: -100px;
+  border-radius: 50%;
+}
+
+.loginContainer::after {
+  content: '';
+  position: absolute;
+  width: 400px;
+  height: 400px;
+  background: var(--brand-secondary);
+  filter: blur(80px);
+  opacity: 0.1;
+  bottom: -50px;
+  left: -50px;
+  border-radius: 50%;
+}
+
+.loginCard {
+  width: 420px;
+  background: rgba(255, 255, 255, 0.95) !important;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  border-radius: var(--radius-xl) !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5) !important;
+  z-index: 1;
+}
+
+.cardHeader {
+  border-bottom: none !important;
+  text-align: center;
+  padding-top: var(--space-xl) !important;
+}
+
+.cardTitle {
+  font-size: 28px !important;
+  font-weight: 800 !important;
+  letter-spacing: -1px;
+  text-transform: uppercase;
+}
+
+.titleMain {
+  color: var(--color-text-primary);
+}
+
+.titleAccent {
+  color: var(--brand-primary);
+}
+
+.formContainer {
+  padding: var(--space-md) var(--space-lg);
+}
+
+.inputLabel {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.loginButton {
+  height: 50px !important;
+  font-size: 16px !important;
+  margin-top: var(--space-md);
+}

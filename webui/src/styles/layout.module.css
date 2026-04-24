@@ -1,0 +1,97 @@
+/* Main layout */
+.layout {
+  min-height: 100vh;
+  background: var(--color-bg-base);
+}
+
+/* Header with premium dark gradient */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--grad-header);
+  padding: 0 var(--space-lg); /* Reduced padding */
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  height: 52px; /* Reduced height */
+  position: relative;
+  z-index: 10;
+}
+
+.logo {
+  color: white;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  display: flex;
+  align-items: center;
+  text-transform: uppercase;
+}
+
+.logoAccent {
+  color: var(--brand-primary);
+}
+
+.userSection {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+}
+
+.username {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 4px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-sm);
+}
+
+.logoutButton {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 14px;
+  transition: all 0.3s ease;
+}
+
+.logoutButton:hover {
+  color: var(--brand-primary) !important;
+  transform: translateX(3px);
+}
+
+/* Sidebar with glassmorphism */
+.sider {
+  background: var(--color-bg-container) !important;
+  border-right: 1px solid var(--color-border-light);
+  box-shadow: 4px 0 15px rgba(0, 0, 0, 0.02);
+}
+
+.sider :global(.ant-menu) {
+  background: transparent !important;
+  border-right: none;
+  padding: var(--space-sm);
+}
+
+.sider :global(.ant-menu-item) {
+  border-radius: var(--radius-md) !important;
+  margin: 4px 0 !important;
+  height: 48px !important;
+  line-height: 48px !important;
+  transition: all 0.3s ease !important;
+}
+
+.sider :global(.ant-menu-item-selected) {
+  background: var(--brand-primary-light) !important;
+  color: var(--brand-primary) !important;
+  font-weight: 600;
+}
+
+.sider :global(.ant-menu-item:hover) {
+  background: var(--color-bg-base) !important;
+  color: var(--brand-primary) !important;
+}
+
+/* Content area */
+.content {
+  padding: var(--space-md) var(--space-lg); /* Reduced padding */
+  background: var(--color-bg-base);
+  min-height: calc(100vh - 52px);
+}

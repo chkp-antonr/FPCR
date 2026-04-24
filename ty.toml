@@ -1,0 +1,8 @@
+[environment]
+root = ["."]
+python-version = "3.13"
+
+#[src]
+# Exclude ssh_utils.py due to ty panic bug (too many cycle iterations)
+# See: https://github.com/astral-sh/ty/issues - report this bug
+#exclude = ["**/ssh_utils.py", "**/decom_old/*"]

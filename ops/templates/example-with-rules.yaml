@@ -1,0 +1,54 @@
+# Example template demonstrating firewall rule creation with positioning
+
+management_servers:
+  - mgmt_name: "mds-prod"
+    domains:
+      - name: "DMZ"
+        operations:
+          # Access rule at top of layer
+          - operation: add
+            type: access-rule
+            layer: "Network"
+            position: "top"
+            data:
+              name: "Allow HTTPS to Web Servers"
+              enabled: true
+              source: ["Any"]
+              destination: ["web-servers"]
+              service: ["https"]
+              action: "Accept"
+              track:
+                type: "Log"
+              install-on: ["Policy_Gateway_DMZ"]
+
+          # Access rule above specific rule
+          - operation: add
+            type: access-rule
+            layer: "Network"
+            position:
+              above: "Deny All"
+            data:
+              name: "Allow Management Access"
+              enabled: true
+              source: ["management-network"]
+              destination: ["Any"]
+              service: ["ssh", "https"]
+              action: "Accept"
+              track:
+                type: "Log"
+              install-on: ["Policy_Gateway_DMZ"]
+
+          # NAT rule at specific position
+          - operation: add
+            type: nat-rule
+            package: "Network"
+            position: 1
+            data:
+              name: "Hide NAT for Internal"
+              enabled: true
+              source: ["internal-network"]
+              destination: ["Any"]
+              service: ["Any"]
+              method: "hide"
+              translated-source: "gw-dmz"
+              install-on: ["Policy_Gateway_DMZ"]

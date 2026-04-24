@@ -1,0 +1,70 @@
+{
+  "management_servers": [
+    {
+      "mgmt_name": "mdsNP2",
+      "domains": [
+        {
+          "name": "General",
+          "operations": [
+            {
+              "operation": "update",
+              "type": "host",
+              "key": {
+                "name": "web-server-01"
+              },
+              "data": {
+                "comment": "Updated: Web server maintenance completed",
+                "color": "blue"
+              }
+            },
+            {
+              "operation": "update",
+              "type": "host",
+              "key": {
+                "ip-address": "192.168.1.20"
+              },
+              "data": {
+                "comment": "Updated: Application server upgraded",
+                "groups": ["AppServers", "Production", "Updated"]
+              }
+            },
+            {
+              "operation": "update",
+              "type": "host",
+              "key": {
+                "uid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              },
+              "data": {
+                "comment": "Updated via UID reference",
+                "color": null
+              }
+            },
+            {
+              "operation": "update",
+              "type": "host",
+              "key": {
+                "name": "temp-server"
+              },
+              "data": {
+                "comment": "Removed from production groups",
+                "groups": []
+              }
+            },
+            {
+              "operation": "update",
+              "type": "host",
+              "key": {
+                "name": "db-server-01"
+              },
+              "data": {
+                "comment": "Database server - high availability config",
+                "color": "orange",
+                "groups": ["DatabaseServers", "Production", "HA"]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

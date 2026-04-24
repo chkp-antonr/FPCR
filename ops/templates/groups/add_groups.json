@@ -1,0 +1,119 @@
+{
+  "management_servers": [
+    {
+      "mgmt_name": "mdsNP2",
+      "domains": [
+        {
+          "name": "General",
+          "operations": [
+            {
+              "operation": "add",
+              "type": "network-group",
+              "data": {
+                "name": "Web-Infrastructure",
+                "comment": "All web infrastructure components",
+                "color": "green",
+                "members": [
+                  "web-server-01",
+                  "web-server-02",
+                  "Web-Network",
+                  "Web-VIP-Range"
+                ],
+                "groups": ["Production", "Web"]
+              },
+              "duplicates": {
+                "action": "return_error"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "network-group",
+              "data": {
+                "name": "App-Servers",
+                "comment": "Application server group",
+                "color": "blue",
+                "members": [
+                  "app-server-01",
+                  "app-server-02",
+                  "App-Network",
+                  "App-Server-Range"
+                ],
+                "groups": ["Production", "Applications"]
+              },
+              "duplicates": {
+                "action": "set_if_name_conflict"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "network-group",
+              "data": {
+                "name": "Database-Servers",
+                "comment": "Database server group",
+                "color": "red",
+                "members": [
+                  "db-server-01",
+                  "db-server-02",
+                  "DB-Network",
+                  "DB-Server-Range"
+                ],
+                "groups": ["Production", "Database"]
+              },
+              "duplicates": {
+                "action": "duplicate"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "network-group",
+              "data": {
+                "name": "DMZ-Infrastructure",
+                "comment": "DMZ infrastructure components",
+                "color": "orange",
+                "members": [
+                  "DMZ-Network",
+                  "DMZ-Public-Range"
+                ],
+                "groups": ["External", "DMZ"]
+              },
+              "duplicates": {
+                "action": "return_error"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "network-group",
+              "data": {
+                "name": "Management-Infrastructure",
+                "comment": "Network management components",
+                "color": "purple",
+                "members": [
+                  "Management-Network",
+                  "Management-IP-Range"
+                ],
+                "groups": ["Internal", "Management"]
+              },
+              "duplicates": {
+                "action": "rename_if_ip_conflict"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "network-group",
+              "data": {
+                "name": "Future-Servers",
+                "comment": "Placeholder for future server infrastructure",
+                "color": "gray",
+                "members": [],
+                "groups": ["Planning"]
+              },
+              "duplicates": {
+                "action": "duplicate"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

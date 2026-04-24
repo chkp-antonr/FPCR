@@ -1,0 +1,62 @@
+.card {
+  width: 100%;
+  flex-shrink: 0;
+  border: 1px solid #d9d9d9;
+  cursor: pointer;
+  transition: border-color 0.3s;
+  position: relative;
+  z-index: 1;
+}
+
+.card:hover {
+  border-color: #1677ff;
+}
+
+.selected {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.2);
+}
+
+.header {
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.line {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 8px;
+}
+
+.lineLabel {
+  font-weight: 500;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.65);
+  margin-bottom: 4px;
+}
+
+.lineFields {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  align-items: center;
+  overflow-x: auto;
+}
+
+.select {
+  min-width: 150px;
+}
+
+.smallSelect {
+  min-width: 105px;
+}
+
+.customInput {
+  width: 60px;
+}
+
+.samePackageCheckbox {
+  margin: 8px 0;
+  font-size: 12px;
+}

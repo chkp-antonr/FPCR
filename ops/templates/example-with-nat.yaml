@@ -1,0 +1,40 @@
+# Example template demonstrating NAT settings for network objects
+
+management_servers:
+  - mgmt_name: "mds-prod"
+    domains:
+      - name: "DMZ"
+        operations:
+          # Host with static NAT
+          - operation: add
+            type: host
+            data:
+              name: "web-server-01"
+              ip-address: "10.0.1.10"
+              nat-settings:
+                method: static
+                ip-address: "203.0.113.10"
+              color: "blue"
+              groups: ["web-servers"]
+
+          # Network with hide NAT
+          - operation: add
+            type: network
+            data:
+              name: "internal-network"
+              subnet: "10.0.1.0"
+              mask-length: 24
+              nat-settings:
+                method: hide
+                gateway: "gw-dmz"
+
+          # Address range with static NAT
+          - operation: add
+            type: address-range
+            data:
+              name: "dmz-server-range"
+              ip-address-first: "10.0.1.100"
+              ip-address-last: "10.0.1.150"
+              nat-settings:
+                method: static
+                ipv4-address: "203.0.113.100"

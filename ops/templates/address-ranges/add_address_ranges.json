@@ -1,0 +1,89 @@
+{
+  "management_servers": [
+    {
+      "mgmt_name": "mdsNP2",
+      "domains": [
+        {
+          "name": "General",
+          "operations": [
+            {
+              "operation": "add",
+              "type": "address-range",
+              "data": {
+                "name": "Web-VIP-Range",
+                "ip-address-first": "192.168.10.100",
+                "ip-address-last": "192.168.10.110",
+                "comment": "Virtual IP addresses for web load balancers",
+                "color": "green",
+                "groups": ["VIP-Range", "Production"]
+              },
+              "duplicates": {
+                "action": "return_error"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "address-range",
+              "data": {
+                "name": "App-Server-Range",
+                "ip-address-first": "192.168.20.50",
+                "ip-address-last": "192.168.20.100",
+                "comment": "Application server IP allocation range",
+                "color": "blue",
+                "groups": ["App-Ranges", "Production"]
+              },
+              "duplicates": {
+                "action": "set_if_name_conflict"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "address-range",
+              "data": {
+                "name": "DB-Server-Range",
+                "ip-address-first": "192.168.30.20",
+                "ip-address-last": "192.168.30.40",
+                "comment": "Database server IP range",
+                "color": "red",
+                "groups": ["DB-Ranges", "Production"]
+              },
+              "duplicates": {
+                "action": "duplicate"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "address-range",
+              "data": {
+                "name": "DMZ-Public-Range",
+                "ip-address-first": "192.168.100.10",
+                "ip-address-last": "192.168.100.50",
+                "comment": "Public IP addresses in DMZ",
+                "color": "orange",
+                "groups": ["DMZ-Ranges", "External"]
+              },
+              "duplicates": {
+                "action": "return_error"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "address-range",
+              "data": {
+                "name": "Management-IP-Range",
+                "ip-address-first": "192.168.200.5",
+                "ip-address-last": "192.168.200.20",
+                "comment": "Management interface IP range",
+                "color": "purple",
+                "groups": ["Management-Ranges", "Internal"]
+              },
+              "duplicates": {
+                "action": "rename_if_ip_conflict"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

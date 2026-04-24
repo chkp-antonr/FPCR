@@ -1,0 +1,9 @@
+.pageContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+  height: calc(100vh - 48px);
+  overflow: hidden;
+  min-height: 0;
+}

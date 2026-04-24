@@ -1,0 +1,63 @@
+{
+  "management_servers": [
+    {
+      "mgmt_name": "mdsNP2",
+      "domains": [
+        {
+          "name": "General",
+          "operations": [
+            {
+              "operation": "delete",
+              "type": "network-group",
+              "key": {
+                "name": "Old-Web-Group"
+              }
+            },
+            {
+              "operation": "delete",
+              "type": "network-group",
+              "key": {
+                "uid": "d0e1f2a3-b4c5-6789-3456-012345678901"
+              }
+            },
+            {
+              "operation": "delete",
+              "type": "network-group",
+              "key": {
+                "name": "Temp-App-Group"
+              }
+            },
+            {
+              "operation": "delete",
+              "type": "network-group",
+              "key": {
+                "name": "Temp-DB-Group"
+              }
+            },
+            {
+              "operation": "delete",
+              "type": "network-group",
+              "key": {
+                "name": "Temp-Test-Group"
+              }
+            },
+            {
+              "operation": "delete",
+              "type": "network-group",
+              "key": {
+                "uid": "e1f2a3b4-c5d6-7890-4567-123456789012"
+              }
+            },
+            {
+              "operation": "delete",
+              "type": "network-group",
+              "key": {
+                "name": "Old-Planning-Group"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

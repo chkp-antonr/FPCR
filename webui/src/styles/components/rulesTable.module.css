@@ -1,0 +1,76 @@
+.tableContainer {
+  background: white;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.table {
+  background: white;
+}
+
+.table .ant-table-thead > tr > th {
+  background: #fafafa;
+  font-weight: 600;
+}
+
+.table .ant-table-tbody > tr.clickable {
+  cursor: pointer;
+}
+
+.table .ant-table-tbody > tr.clickable:hover {
+  background-color: #fafafa;
+}
+
+.table .ant-table-tbody > tr.selected {
+  background-color: #e6f7ff;
+}
+
+.table .ant-table-tbody > tr.dropTarget {
+  background-color: #e6f7ff;
+  border-top: 2px solid #1677ff;
+}
+
+.table .ant-table-tbody > tr.dropTarget td {
+  background-color: #e6f7ff;
+  border-top: 1px solid #1677ff;
+}
+
+.table .ant-table-tbody > tr.errorRow {
+  background-color: #fff2f0;
+}
+
+.table .ant-table-tbody > tr.errorRow td {
+  background-color: #fff2f0;
+}
+
+.usedTag {
+  background-color: #f0f0f0;
+  color: #8c8c8c;
+  border: 1px solid #d9d9d9;
+}
+
+.unusedTag {
+  background-color: #fff7e6;
+  color: #d46b08;
+  border: 1px solid #ffbb96;
+  font-weight: 500;
+}
+
+.unusedTag:hover {
+  background-color: #ffe7ba;
+  border-color: #ffa940;
+}
+
+.smallSelect {
+  min-width: 80px;
+}
+
+@media (max-width: 768px) {
+  .tableContainer {
+    overflow-x: auto;
+  }
+
+  .table {
+    font-size: 12px;
+  }
+}

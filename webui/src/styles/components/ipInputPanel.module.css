@@ -1,0 +1,25 @@
+.inputPanel {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.inputColumn {
+  display: flex;
+  flex-direction: column;
+}
+
+.label {
+  font-weight: 500;
+  margin-bottom: 8px;
+  color: #000000d9;
+}
+
+.tagsInput {
+  width: 100%;
+}
+
+.tagsInput .ant-select-selector {
+  min-height: 80px !important;
+}

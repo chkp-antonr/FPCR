@@ -1,0 +1,35 @@
+.pageContainer {
+  padding: 24px;
+  background-color: #f5f5f5;
+  min-height: 100vh;
+}
+
+.submitSection {
+  background: white;
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 16px;
+  text-align: right;
+}
+
+.submitButton {
+  min-width: 150px;
+}
+
+.addButton {
+  background: #1677ff;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  margin: 16px 0;
+  cursor: pointer;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.addButton:hover {
+  background: #4096ff;
+}

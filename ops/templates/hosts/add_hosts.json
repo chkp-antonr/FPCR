@@ -1,0 +1,70 @@
+{
+  "management_servers": [
+    {
+      "mgmt_name": "mdsNP2",
+      "domains": [
+        {
+          "name": "General",
+          "operations": [
+            {
+              "operation": "add",
+              "type": "host",
+              "data": {
+                "name": "web-server-01",
+                "ip-address": "192.168.1.10",
+                "comment": "Primary web server",
+                "color": "green",
+                "groups": ["WebServers", "Production"]
+              },
+              "duplicates": {
+                "action": "return_error"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "host",
+              "data": {
+                "name": "web-server-02",
+                "ip-address": "192.168.1.11",
+                "comment": "Secondary web server",
+                "color": "green",
+                "groups": ["WebServers", "Production"]
+              },
+              "duplicates": {
+                "action": "rename_if_ip_conflict"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "host",
+              "data": {
+                "name": "app-server-01",
+                "ip-address": "192.168.1.20",
+                "comment": "Application server 01",
+                "color": "blue",
+                "groups": ["AppServers", "Production"]
+              },
+              "duplicates": {
+                "action": "duplicate"
+              }
+            },
+            {
+              "operation": "add",
+              "type": "host",
+              "data": {
+                "name": "db-server-01",
+                "ip-address": "192.168.1.30",
+                "comment": "Primary database server",
+                "color": "red",
+                "groups": ["DatabaseServers", "Production"]
+              },
+              "duplicates": {
+                "action": "set_if_name_conflict"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

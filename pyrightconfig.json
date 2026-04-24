@@ -1,0 +1,15 @@
+{
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Windows",
+  "exclude": [
+    "**/docs/examples/**",
+    "**/docs/examples_v2/**",
+    "**/scripts/**",
+    "**/tests/integration/**",
+    "**/tests/mock_api/**"
+  ],
+  "reportMissingImports": "error",
+  "reportPossiblyUnboundVariable": "error",
+  "reportUnsupportedDunderAll": "warning"
+}

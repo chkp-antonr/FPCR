@@ -1,0 +1,38 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.ruff_cache/
+
+.venv/
+
+*.stackdump
+
+.claude/
+.agent/
+.agents/
+
+# Graphify outputs
+graphify/
+graphify-out/
+# Graphify user config
+.graphifyignore
+
+# Worktrees
+.worktrees/
+libs/
+
+# WebUI
+webui/node_modules/
+webui/dist/
+webui/.env.local
+webui/.env.*.local
+_tmp/
+
+#
+.env
+.env.secrets
+docs/_AI_

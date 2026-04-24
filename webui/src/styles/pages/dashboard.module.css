@@ -1,0 +1,123 @@
+.pageContainer {
+  padding: var(--space-lg);
+}
+
+.welcomeCard {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  border: 1px solid var(--color-border-light);
+}
+
+.title {
+  margin-bottom: var(--space-md);
+}
+
+.paragraph {
+  margin-bottom: var(--space-md);
+  color: var(--color-text-secondary);
+}
+
+.viewButton {
+  margin-top: var(--space-md);
+}
+
+.headerRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.progressPanel {
+  margin-top: var(--space-sm);
+  padding: 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: #ffffff;
+}
+
+.progressLabel {
+  margin-bottom: 6px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.cardsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: var(--space-lg);
+}
+
+.ritmCard {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  border: 1px solid var(--color-border-light);
+}
+
+.cardTitle {
+  margin: 0 0 var(--space-md);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.cardHeader {
+  display: grid;
+  gap: var(--space-md);
+  padding: 0 0 var(--space-sm);
+  margin-bottom: var(--space-xs);
+  border-bottom: 1px solid var(--color-border-light);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.listItem {
+  padding-inline: 0 !important;
+}
+
+.ritmRowButton {
+  width: 100%;
+  display: grid;
+  gap: var(--space-md);
+  align-items: center;
+  border: 0;
+  background: transparent;
+  padding: var(--space-sm) 0;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ritmRowButton:hover {
+  color: var(--color-primary);
+}
+
+.primaryCell {
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .headerRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .viewButton {
+    margin-top: 0;
+  }
+
+  .cardHeader {
+    display: none;
+  }
+
+  .ritmRowButton {
+    grid-template-columns: 1fr !important;
+    gap: 4px;
+  }
+
+  .primaryCell {
+    margin-bottom: 2px;
+  }
+}

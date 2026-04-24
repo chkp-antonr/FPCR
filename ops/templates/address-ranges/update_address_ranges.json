@@ -1,0 +1,72 @@
+{
+  "management_servers": [
+    {
+      "mgmt_name": "mdsNP2",
+      "domains": [
+        {
+          "name": "General",
+          "operations": [
+            {
+              "operation": "update",
+              "type": "address-range",
+              "key": {
+                "name": "Web-VIP-Range"
+              },
+              "data": {
+                "comment": "Updated: Expanded VIP range for high availability",
+                "ip-address-last": "192.168.10.120"
+              }
+            },
+            {
+              "operation": "update",
+              "type": "address-range",
+              "key": {
+                "uid": "f6a7b8c9-d0e1-2345-f012-678901234567"
+              },
+              "data": {
+                "comment": "Updated via UID reference",
+                "color": null
+              }
+            },
+            {
+              "operation": "update",
+              "type": "address-range",
+              "key": {
+                "name": "App-Server-Range"
+              },
+              "data": {
+                "comment": "Updated: Application range expanded for growth",
+                "ip-address-first": "192.168.20.40",
+                "ip-address-last": "192.168.20.120"
+              }
+            },
+            {
+              "operation": "update",
+              "type": "address-range",
+              "key": {
+                "name": "Temp-Range"
+              },
+              "data": {
+                "comment": "Range decommissioned - removed from groups",
+                "groups": []
+              }
+            },
+            {
+              "operation": "update",
+              "type": "address-range",
+              "key": {
+                "name": "DB-Server-Range"
+              },
+              "data": {
+                "comment": "Database server range - expanded for clustering",
+                "color": "orange",
+                "groups": ["DB-Ranges", "Production", "HA", "Critical"],
+                "ip-address-last": "192.168.30.60"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+# Prepare some objects to test search
+
+management_servers:
+  - mgmt_name: ""
+    domains:
+      - name: "General"
+        operations:
+          - operation: "add"
+            type: "host"
+            data:
+              name: "web-server-01"
+              ip-address: "192.168.1.11"
+              comments: "Primary web server"
+              color: "cyan"
+              groups: ["WebServers", "Production"]
+            duplicates: "set_if_name_conflict"
+
+          - operation: "add"
+            type: "host"
+            data:
+              name: "web-server-02"
+              ip-address: "192.168.1.12"
+              comments: "Secondary web server"
+              color: "cyan"
+              groups: ["WebServers", "Production"]
+            duplicates: "set_if_name_conflict"
+
+          - operation: "add"
+            type: "network-group"
+            data:
+              name: "App-Servers"
+              comments: "App-Servers includes Production network group"
+              color: "dark orange"
+            duplicates: "set_if_name_conflict"
+
+          - operation: "add"
+            type: "network-group"
+            data:
+              name: "Production"
+              comments: "Production network group"
+              color: "forest green"
+              members: ["web-server-01", "web-server-02"]
+              groups: ["App-Servers"]
+            duplicates: "set_if_name_conflict"
+
+      - name: "Legacy"
+        operations:
+          - operation: "add"
+            type: "host"
+            data:
+              name: "web-server-01"
+              ip-address: "192.168.11.11"
+              comments: "Primary web server"
+              color: "blue"
+              groups: ["LegacyWebServers"]
+            duplicates: "set_if_name_conflict"

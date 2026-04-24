@@ -1,0 +1,42 @@
+{
+  "domains": {
+    "AME_CORP": {
+      "policies": {
+        "US-NY-CORP": {
+          "firewalls": {
+            "USNY-CORP-FW": {
+              "subnets": [
+                "10.76.66.0/24"
+              ]
+            }
+          },
+          "sections": {
+            "init": 3,
+            "ingress": 5,
+            "egress": 5,
+            "cleanup": 2
+          }
+        }
+      }
+    },
+    "AME_DC": {
+      "policies": {
+        "US-NY-DC": {
+          "firewalls": {
+            "US-NY-DC": {
+              "subnets": [
+                "10.76.67.0/24"
+              ]
+            }
+          },
+          "sections": {
+            "init": 4,
+            "ingress": 4,
+            "egress": 6,
+            "cleanup": 1
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "management_servers": [
+    {
+      "mgmt_name": "mdsNP2",
+      "domains": [
+        {
+          "name": "General",
+          "operations": [
+            {
+              "operation": "update",
+              "type": "network-group",
+              "key": {
+                "name": "Web-Infrastructure"
+              },
+              "data": {
+                "comment": "Updated: Web infrastructure with load balancer",
+                "members": [
+                  "web-server-01",
+                  "web-server-02",
+                  "web-server-03",
+                  "Web-Network",
+                  "Web-VIP-Range"
+                ]
+              }
+            },
+            {
+              "operation": "update",
+              "type": "network-group",
+              "key": {
+                "uid": "c9d0e1f2-a3b4-5678-2345-901234567890"
+              },
+              "data": {
+                "comment": "Updated via UID reference - expanded app servers",
+                "color": null
+              }
+            },
+            {
+              "operation": "update",
+              "type": "network-group",
+              "key": {
+                "name": "App-Servers"
+              },
+              "data": {
+                "comment": "Updated: Application servers with new components",
+                "members": [
+                  "app-server-01",
+                  "app-server-02",
+                  "app-server-03",
+                  "App-Network",
+                  "App-Server-Range",
+                  "Web-Infrastructure"
+                ]
+              }
+            },
+            {
+              "operation": "update",
+              "type": "network-group",
+              "key": {
+                "name": "Temp-Group"
+              },
+              "data": {
+                "comment": "Group cleared for restructuring",
+                "members": []
+              }
+            },
+            {
+              "operation": "update",
+              "type": "network-group",
+              "key": {
+                "name": "Database-Servers"
+              },
+              "data": {
+                "comment": "Database servers with clustering configuration",
+                "color": "orange",
+                "groups": ["Production", "Database", "HA", "Critical"],
+                "members": [
+                  "db-server-01",
+                  "db-server-02",
+                  "db-server-03",
+                  "DB-Network",
+                  "DB-Server-Range"
+                ]
+              }
+            },
+            {
+              "operation": "update",
+              "type": "network-group",
+              "key": {
+                "name": "Development-Group"
+              },
+              "data": {
+                "comment": "Removed test servers from development",
+                "members": [
+                  "dev-server-01",
+                  "dev-server-02"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

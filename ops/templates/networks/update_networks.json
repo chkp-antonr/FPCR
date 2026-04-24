@@ -1,0 +1,70 @@
+{
+  "management_servers": [
+    {
+      "mgmt_name": "mdsNP2",
+      "domains": [
+        {
+          "name": "General",
+          "operations": [
+            {
+              "operation": "update",
+              "type": "network",
+              "key": {
+                "name": "Web-Network"
+              },
+              "data": {
+                "comment": "Updated: Expanded web network segment",
+                "mask-length": 23
+              }
+            },
+            {
+              "operation": "update",
+              "type": "network",
+              "key": {
+                "uid": "c3d4e5f6-a7b8-9012-cdef-345678901234"
+              },
+              "data": {
+                "comment": "Updated via UID reference",
+                "color": null
+              }
+            },
+            {
+              "operation": "update",
+              "type": "network",
+              "key": {
+                "name": "App-Network"
+              },
+              "data": {
+                "comment": "Updated: Application network with new subnet allocation",
+                "groups": ["AppNetworks", "Production", "Expanded"]
+              }
+            },
+            {
+              "operation": "update",
+              "type": "network",
+              "key": {
+                "name": "Temp-Network"
+              },
+              "data": {
+                "comment": "Network decommissioned - removed from groups",
+                "groups": []
+              }
+            },
+            {
+              "operation": "update",
+              "type": "network",
+              "key": {
+                "name": "DB-Network"
+              },
+              "data": {
+                "comment": "Database network - high availability expanded",
+                "color": "orange",
+                "groups": ["DatabaseNetworks", "Production", "HA", "Critical"]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

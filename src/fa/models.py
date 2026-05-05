@@ -21,7 +21,9 @@ _known_tables = {
     "ritm_created_objects",
     "ritm_created_rules",
     "ritm_verification",
-    "ritm_sessions",
+    "ritm_editors",
+    "ritm_reviewers",
+    "ritm_evidence_sessions",
 }
 if _known_tables & SQLModel.metadata.tables.keys():
     SQLModel.metadata.clear()
@@ -248,26 +250,11 @@ class RITM(SQLModel, table=True):
     status: int = Field(default=RITMStatus.WORK_IN_PROGRESS)
     approver_locked_by: str | None = None
     approver_locked_at: datetime | None = None
-    # Input pools stored as JSON arrays
+    editor_locked_by: str | None = None
+    editor_locked_at: datetime | None = None
     source_ips: str | None = Field(default=None, description="JSON array of source IPs")
     dest_ips: str | None = Field(default=None, description="JSON array of destination IPs")
     services: str | None = Field(default=None, description="JSON array of services")
-    # RITM workflow tracking columns
-    engineer_initials: str | None = Field(default=None)
-    evidence_html: str | None = Field(default=None)
-    evidence_yaml: str | None = Field(default=None)
-    evidence_changes: str | None = Field(default=None)
-    # Session changes for PDF evidence generation
-    session_changes_evidence1: str | None = Field(
-        default=None, description="JSON: session_changes after apply"
-    )
-    session_changes_evidence2: str | None = Field(
-        default=None, description="JSON: session_changes after confirmation"
-    )
-    # Session UID for evidence re-creation (maps to current API session during Try & Verify)
-    try_verify_session_uid: str | None = Field(
-        default=None, description="Session UID where changes were made"
-    )
 
 
 class Policy(SQLModel, table=True):
@@ -341,21 +328,59 @@ class RITMVerification(SQLModel, table=True):
     created_at: datetime = Field(sa_column=Column(DateTime(), default=lambda: datetime.now(UTC)))
 
 
-class RITMSession(SQLModel, table=True):
-    """Store session UIDs per domain for each RITM.
+class RITMEditor(SQLModel, table=True):
+    """Engineers who have edited this RITM – permanently blocked from approving."""
 
-    Enables evidence re-creation by storing the session that made changes.
-    """
-
-    __tablename__ = cast(Any, "ritm_sessions")
+    __tablename__ = cast(Any, "ritm_editors")
+    __table_args__ = (UniqueConstraint("ritm_number", "username"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    ritm_number: str = Field(foreign_key="ritm.ritm_number")
+    ritm_number: str = Field(foreign_key="ritm.ritm_number", index=True)
+    username: str
+    added_at: datetime = Field(sa_column=Column(DateTime(), default=lambda: datetime.now(UTC)))
+
+
+class RITMReviewer(SQLModel, table=True):
+    """Engineers who have approved/rejected this RITM – permanently blocked from editing."""
+
+    __tablename__ = cast(Any, "ritm_reviewers")
+
+    id: int | None = Field(default=None, primary_key=True)
+    ritm_number: str = Field(foreign_key="ritm.ritm_number", index=True)
+    username: str
+    action: str  # "approved" | "rejected"
+    acted_at: datetime = Field(sa_column=Column(DateTime(), default=lambda: datetime.now(UTC)))
+
+
+class RITMEvidenceSession(SQLModel, table=True):
+    """Cumulative evidence history – one row per successful package per Try & Verify / publish run."""
+
+    __tablename__ = cast(Any, "ritm_evidence_sessions")
+
+    id: int | None = Field(default=None, primary_key=True)
+    ritm_number: str = Field(foreign_key="ritm.ritm_number", index=True)
+    attempt: int
     domain_name: str
     domain_uid: str
-    session_uid: str
-    sid: str
+    package_name: str
+    package_uid: str
+    session_uid: str | None = None
+    sid: str | None = None
+    session_type: str  # "initial" | "correction" | "approval"
+    session_changes: str | None = None  # JSON blob: raw show-changes API response
     created_at: datetime = Field(sa_column=Column(DateTime(), default=lambda: datetime.now(UTC)))
+
+
+# Backward compatibility alias
+RITMSession = RITMEvidenceSession
+
+
+class ReviewerItem(BaseModel):
+    """Single reviewer action."""
+
+    username: str
+    action: str  # "approved" | "rejected"
+    acted_at: str
 
 
 class RITMItem(BaseModel):
@@ -371,12 +396,13 @@ class RITMItem(BaseModel):
     status: int
     approver_locked_by: str | None = None
     approver_locked_at: str | None = None
-    # Input pools
+    editor_locked_by: str | None = None
+    editor_locked_at: str | None = None
     source_ips: list[str] | None = None
     dest_ips: list[str] | None = None
     services: list[str] | None = None
-    # Evidence data
-    session_changes_evidence1: str | None = None
+    editors: list[str] = []
+    reviewers: list[ReviewerItem] = []
 
 
 class RITMCreateRequest(BaseModel):
@@ -505,6 +531,40 @@ class EvidenceResponse(BaseModel):
     html: str
     yaml: str
     changes: dict[str, Any]
+
+
+class EvidenceSessionItem(BaseModel):
+    """Single session entry in the evidence history."""
+
+    id: int
+    attempt: int
+    session_type: str
+    session_uid: str | None = None
+    sid: str | None = None
+    created_at: str
+    session_changes: dict[str, Any] | None = None
+
+
+class PackageEvidenceItem(BaseModel):
+    """Package entry in the evidence history."""
+
+    package_name: str
+    package_uid: str
+    sessions: list[EvidenceSessionItem]
+
+
+class DomainEvidenceItem(BaseModel):
+    """Domain entry in the evidence history."""
+
+    domain_name: str
+    domain_uid: str
+    packages: list[PackageEvidenceItem]
+
+
+class EvidenceHistoryResponse(BaseModel):
+    """Full cumulative evidence history for a RITM."""
+
+    domains: list[DomainEvidenceItem]
 
 
 class PlanYamlResponse(BaseModel):

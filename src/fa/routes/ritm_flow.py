@@ -3,25 +3,36 @@
 import json
 import re
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from arlogi import get_logger
 from cpaiops import CPAIOPSClient
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from ..config import settings
 from ..db import engine
 from ..models import (
+    RITM,
     CachedSection,
+    DomainEvidenceItem,
+    EvidenceHistoryResponse,
     EvidenceResponse,
+    EvidenceSessionItem,
     MatchObjectsRequest,
     MatchObjectsResponse,
     MatchResult,
+    PackageEvidenceItem,
     PlanYamlResponse,
+    Policy,
+    PublishResponse,
+    RITMCreatedRule,
+    RITMEvidenceSession,
+    RITMStatus,
     RITMVerification,
     TryVerifyResponse,
 )
@@ -340,208 +351,359 @@ async def try_verify_ritm(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@router.post("/ritm/{ritm_number}/recreate-evidence")
-async def recreate_evidence(
+@router.post("/ritm/{ritm_number}/publish")
+async def publish_ritm(
     ritm_number: str,
     session: SessionData = Depends(get_session_data),
-) -> EvidenceResponse:
-    """Re-generate evidence from stored session UIDs.
+) -> PublishResponse:
+    """Enable disabled rules, verify, capture approval evidence, and publish.
 
-    Fetches fresh show-changes from Check Point to capture any manual changes
-    made after the original Try & Verify.
+    Per domain/package:
+    1. Enable disabled rules from ritm_created_rules
+    2. Verify policy – on failure re-disable rules, continue
+    3. Capture show-changes (approval evidence)
+    4. Publish with session name '{RITM} {username} Published'
+
+    On all packages succeeding: status → COMPLETED
     """
-    from ..models import RITM, RITMSession
-
-    logger.info(f"Recreating evidence for RITM {ritm_number} by user {session.username}")
-
-    # Use single database session throughout
     async with AsyncSession(engine) as db:
-        # Get RITM
         ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
         ritm = ritm_result.scalar_one_or_none()
         if not ritm:
             raise HTTPException(status_code=404, detail="RITM not found")
 
-        # Get stored session UIDs for this RITM
-        sessions_result = await db.execute(
-            select(RITMSession).where(col(RITMSession.ritm_number) == ritm_number)
+        if ritm.status != RITMStatus.APPROVED:
+            raise HTTPException(status_code=400, detail="RITM must be approved before publishing")
+
+        policies_result = await db.execute(
+            select(Policy).where(col(Policy.ritm_number) == ritm_number)
         )
-        ritm_sessions = sessions_result.scalars().all()
+        policies = list(policies_result.scalars().all())
+        if not policies:
+            raise HTTPException(status_code=400, detail="RITM has no policies to publish")
 
-        if not ritm_sessions:
-            raise HTTPException(
-                status_code=400,
-                detail="No session UIDs found for this RITM. Run Try & Verify first.",
+        rules_result = await db.execute(
+            select(RITMCreatedRule).where(col(RITMCreatedRule.ritm_number) == ritm_number)
+        )
+        created_rules = list(rules_result.scalars().all())
+
+        # Compute approval attempt number
+        attempt_result = await db.execute(
+            select(func.max(RITMEvidenceSession.attempt)).where(
+                col(RITMEvidenceSession.ritm_number) == ritm_number
             )
+        )
+        max_attempt = attempt_result.scalar_one_or_none()
+        attempt = (max_attempt or 0) + 1
 
-        logger.info(f"Found {len(ritm_sessions)} sessions for RITM {ritm_number}")
+    # Build per-package rule lists
+    rules_by_pkg: dict[tuple[str, str], list[RITMCreatedRule]] = {}
+    for rule in created_rules:
+        rules_by_pkg.setdefault((rule.domain_uid, rule.package_uid), []).append(rule)
 
-        try:
-            async with CPAIOPSClient(
-                engine=engine,
-                username=session.username,
-                password=session.password,
-                mgmt_ip=settings.api_mgmt,
-            ) as client:
-                mgmt_name = client.get_mgmt_names()[0]
-                pdf_generator = SessionChangesPDFGenerator()
+    # Build domain/package name lookup from policies
+    pkg_meta: dict[tuple[str, str], tuple[str, str]] = {}  # (domain_uid, pkg_uid) -> (domain_name, pkg_name)
+    for policy in policies:
+        pkg_meta[(policy.domain_uid, policy.package_uid)] = (policy.domain_name, policy.package_name)
 
-                # Combine fresh show-changes from all stored sessions
-                combined_session_changes: dict[str, Any] = {
-                    "apply_sessions": {},
-                    "apply_session_trace": [],
-                    "domain_changes": {},
-                    "show_changes_requests": {},
-                    "errors": [],
-                }
+    errors: list[str] = []
+    success_count = 0
 
-                # Track valid sessions for apply_session_trace
-                valid_sessions_count = 0
+    try:
+        async with CPAIOPSClient(
+            engine=engine,
+            username=session.username,
+            password=session.password,
+            mgmt_ip=settings.api_mgmt,
+        ) as client:
+            mgmt_name = client.get_mgmt_names()[0]
+            verifier = PolicyVerifier(client)
 
-                for ritm_session in ritm_sessions:
-                    # Skip sessions without session_uid
-                    if not ritm_session.session_uid:
-                        logger.warning(
-                            f"Skipping session for domain {ritm_session.domain_name}: no session_uid"
+            for (domain_uid, package_uid), (domain_name, package_name) in pkg_meta.items():
+                pkg_rules = rules_by_pkg.get((domain_uid, package_uid), [])
+                enabled_uids: list[str] = []
+
+                # 1. Enable disabled rules
+                for rule in pkg_rules:
+                    result = await client.api_call(
+                        mgmt_name=mgmt_name,
+                        domain=domain_name,
+                        command="set-access-rule",
+                        payload={"uid": rule.rule_uid, "enabled": True},
+                    )
+                    if result.success:
+                        enabled_uids.append(rule.rule_uid)
+                    else:
+                        errors.append(
+                            f"Failed to enable rule {rule.rule_uid} in {domain_name}: "
+                            f"{result.message or result.code}"
                         )
-                        continue
 
-                    valid_sessions_count += 1
+                # 2. Verify policy
+                verify_result = await verifier.verify_policy(
+                    domain_name=domain_name, package_name=package_name
+                )
+                if not verify_result.success:
+                    for uid in enabled_uids:
+                        await client.api_call(
+                            mgmt_name=mgmt_name,
+                            domain=domain_name,
+                            command="set-access-rule",
+                            payload={"uid": uid, "enabled": False},
+                        )
+                    errors.extend(verify_result.errors)
+                    continue
 
-                    # Build apply_session_trace entry
-                    combined_session_changes["apply_session_trace"].append(
-                        {
-                            "domain": ritm_session.domain_name,
-                            "domain_uid": ritm_session.domain_uid,
-                            "session_uid": ritm_session.session_uid,
-                            "sid": ritm_session.sid,
-                        }
+                # 3. Capture show-changes for approval evidence
+                session_result = await client.api_call(
+                    mgmt_name=mgmt_name,
+                    domain=domain_name,
+                    command="show-session",
+                    payload={},
+                )
+                session_uid: str | None = None
+                if session_result.success and session_result.data:
+                    session_uid = session_result.data.get("uid") or session_result.data.get("session-uid")
+
+                sc_result = await client.api_call(
+                    mgmt_name=mgmt_name,
+                    domain=domain_name,
+                    command="show-changes",
+                    details_level="full",
+                    payload={"to-session": session_uid} if session_uid else {},
+                )
+                session_changes = sc_result.data if sc_result.success and sc_result.data else {}
+
+                # 4. Publish
+                pub_result = await client.api_call(
+                    mgmt_name=mgmt_name,
+                    domain=domain_name,
+                    command="publish",
+                    payload={},
+                )
+
+                if pub_result.success:
+                    success_count += 1
+                    async with AsyncSession(engine) as db:
+                        db.add(
+                            RITMEvidenceSession(
+                                ritm_number=ritm_number,
+                                attempt=attempt,
+                                domain_name=domain_name,
+                                domain_uid=domain_uid,
+                                package_name=package_name,
+                                package_uid=package_uid,
+                                session_uid=session_uid,
+                                sid="",
+                                session_type="approval",
+                                session_changes=json.dumps(session_changes) if session_changes else None,
+                                created_at=datetime.now(UTC),
+                            )
+                        )
+                        await db.commit()
+                else:
+                    errors.append(
+                        f"Publish failed for {domain_name}: {pub_result.message or pub_result.code}"
                     )
 
-                    # Call show-changes with stored session UID
-                    sc_payload: dict[str, Any] = {"to-session": ritm_session.session_uid}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in publish_ritm for RITM {ritm_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    if success_count == 0 and errors:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Publish failed for all packages: {'; '.join(errors)}",
+        )
+
+    async with AsyncSession(engine) as db:
+        ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        ritm = ritm_result.scalar_one()
+        ritm.status = RITMStatus.COMPLETED
+        await db.commit()
+
+    return PublishResponse(
+        success=True,
+        message=f"Published {success_count} package(s) for RITM {ritm_number}",
+        created=success_count,
+        errors=errors,
+    )
+
+
+@router.post("/ritm/{ritm_number}/recreate-evidence")
+async def recreate_evidence(
+    ritm_number: str,
+    session: SessionData = Depends(get_session_data),
+) -> EvidenceResponse:
+    """Re-fetch show-changes for all stored sessions and update evidence in DB."""
+    logger.info(f"Recreating evidence for RITM {ritm_number} by user {session.username}")
+
+    async with AsyncSession(engine) as db:
+        ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        if not ritm_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="RITM not found")
+
+        sessions_result = await db.execute(
+            select(RITMEvidenceSession).where(
+                col(RITMEvidenceSession.ritm_number) == ritm_number
+            )
+        )
+        evidence_rows = sessions_result.scalars().all()
+
+    if not evidence_rows:
+        raise HTTPException(
+            status_code=400, detail="No session UIDs found for this RITM. Run Try & Verify first."
+        )
+
+    try:
+        async with CPAIOPSClient(
+            engine=engine,
+            username=session.username,
+            password=session.password,
+            mgmt_ip=settings.api_mgmt,
+        ) as client:
+            mgmt_name = client.get_mgmt_names()[0]
+
+            async with AsyncSession(engine) as db:
+                for row in evidence_rows:
+                    if not row.session_uid:
+                        continue
 
                     sc_result = await client.api_call(
                         mgmt_name=mgmt_name,
-                        domain=ritm_session.domain_name,
+                        domain=row.domain_name,
                         command="show-changes",
                         details_level="full",
-                        payload=sc_payload,
+                        payload={"to-session": row.session_uid},
                     )
 
                     if sc_result.success and sc_result.data:
-                        domain_data = sc_result.data
-                        combined_session_changes["domain_changes"].update(
-                            domain_data.get("domain_changes", {})
-                        )
-                        combined_session_changes["apply_sessions"].update(
-                            domain_data.get("apply_sessions", {})
-                        )
+                        fresh = await db.get(RITMEvidenceSession, row.id)
+                        if fresh:
+                            fresh.session_changes = json.dumps(sc_result.data)
                     else:
                         logger.warning(
-                            f"show-changes failed for domain {ritm_session.domain_name}: "
-                            f"{sc_result.message or sc_result.code or 'unknown error'}"
-                        )
-                        combined_session_changes["errors"].append(
-                            f"show-changes failed for domain {ritm_session.domain_name}: "
-                            f"{sc_result.message or sc_result.code or 'unknown error'}"
+                            f"show-changes failed for {row.domain_name} session {row.session_uid}: "
+                            f"{sc_result.message or sc_result.code}"
                         )
 
-                logger.info(
-                    f"Processed {valid_sessions_count} valid sessions for RITM {ritm_number}"
-                )
-
-                # Build UID-to-name mapping for both sections and access layers
-                section_uid_to_name: dict[str, str] = {}
-
-                # 1. Fetch cached sections
-                sections_result = await db.execute(select(CachedSection))
-                sections = sections_result.scalars().all()
-                logger.debug(f"Loaded {len(sections)} cached sections from database")
-                for s in sections:
-                    section_uid_to_name[s.uid] = s.name
-
-                # 2. Fetch access layers for each domain in the sessions
-                # Access layers are different from sections - rules reference layer UIDs directly
-                for ritm_session in ritm_sessions:
-                    domain_name = ritm_session.domain_name
-                    layers_result = await client.api_call(
-                        mgmt_name=mgmt_name,
-                        domain=domain_name,
-                        command="show-access-layers",
-                        payload={},
-                    )
-                    if layers_result.success and layers_result.data:
-                        for layer in layers_result.data.get("access-layers", []):
-                            layer_uid = layer.get("uid")
-                            layer_name = layer.get("name")
-                            if layer_uid and layer_name:
-                                section_uid_to_name[layer_uid] = layer_name
-                    else:
-                        logger.warning(
-                            f"Failed to fetch layers for {domain_name}: {layers_result.message or layers_result.code}"
-                        )
-
-                logger.debug(
-                    f"Built UID-to-name mapping: {len(section_uid_to_name)} entries (sections + layers)"
-                )
-
-                # Generate HTML
-                html = pdf_generator.generate_html(
-                    ritm_number=ritm_number,
-                    evidence_number=1,
-                    username=session.username,
-                    session_changes=combined_session_changes,
-                    section_uid_to_name=section_uid_to_name,
-                )
-
-                # Check if we got meaningful changes (session wasn't published)
-                has_changes = any(
-                    dc.get("tasks", []) and dc["tasks"][0].get("task-details", [])
-                    for dc in combined_session_changes.get("domain_changes", {}).values()
-                )
-
-                if not has_changes and ritm.session_changes_evidence1:
-                    # Session was published, show-changes returns empty - use original evidence
-                    logger.info(
-                        f"Session for RITM {ritm_number} was published, using original evidence"
-                    )
-                    try:
-                        original_evidence = json.loads(ritm.session_changes_evidence1)
-                        html = pdf_generator.generate_html(
-                            ritm_number=ritm_number,
-                            evidence_number=1,
-                            username=session.username,
-                            session_changes=original_evidence,
-                            section_uid_to_name=section_uid_to_name,
-                        )
-                        return EvidenceResponse(
-                            html=html,
-                            yaml="",
-                            changes=original_evidence.get("domain_changes", {}),
-                        )
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Failed to parse original evidence, returning empty evidence"
-                        )
-
-                # Update stored evidence using the same db session
-                ritm.session_changes_evidence1 = json.dumps(combined_session_changes)
                 await db.commit()
 
-                logger.info(f"Successfully recreated evidence for RITM {ritm_number}")
-
-                return EvidenceResponse(
-                    html=html,
-                    yaml="",  # Not applicable for re-created evidence
-                    changes=combined_session_changes.get("domain_changes", {}),
+            # Build combined for response
+            combined: dict[str, Any] = {"domain_changes": {}, "errors": []}
+            async with AsyncSession(engine) as db:
+                refreshed_result = await db.execute(
+                    select(RITMEvidenceSession).where(
+                        col(RITMEvidenceSession.ritm_number) == ritm_number
+                    )
                 )
+                for row in refreshed_result.scalars().all():
+                    sc: dict[str, Any] = {}
+                    if row.session_changes:
+                        try:
+                            sc = json.loads(row.session_changes)
+                        except Exception:
+                            pass
+                    if row.domain_name not in combined["domain_changes"]:
+                        combined["domain_changes"][row.domain_name] = {}
+                    combined["domain_changes"][row.domain_name].update(sc)
 
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Error in recreate_evidence for RITM {ritm_number}: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e)) from e
+            pdf_generator = get_pdf_generator()
+            html = pdf_generator.generate_html(
+                ritm_number=ritm_number,
+                evidence_number=1,
+                username=session.username,
+                session_changes=combined,
+                section_uid_to_name={},
+            )
+
+            return EvidenceResponse(
+                html=html,
+                yaml="",
+                changes=combined.get("domain_changes", {}),
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in recreate_evidence for RITM {ritm_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get("/ritm/{ritm_number}/evidence-history")
+async def get_evidence_history(
+    ritm_number: str,
+    _session: SessionData = Depends(get_session_data),
+) -> EvidenceHistoryResponse:
+    """Return full cumulative evidence history grouped as Domain -> Package -> Sessions."""
+    async with AsyncSession(engine) as db:
+        ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        if not ritm_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="RITM not found")
+
+        evidence_result = await db.execute(
+            select(RITMEvidenceSession)
+            .where(col(RITMEvidenceSession.ritm_number) == ritm_number)
+            .order_by(
+                col(RITMEvidenceSession.domain_name).asc(),
+                col(RITMEvidenceSession.package_name).asc(),
+                col(RITMEvidenceSession.attempt).asc(),
+            )
+        )
+        rows = evidence_result.scalars().all()
+
+    # Build domain -> package -> sessions hierarchy
+    domains_map: dict[str, dict[str, list[EvidenceSessionItem]]] = {}
+    domain_uids: dict[str, str] = {}
+    package_uids: dict[tuple[str, str], str] = {}
+
+    for row in rows:
+        if row.domain_name not in domains_map:
+            domains_map[row.domain_name] = {}
+            domain_uids[row.domain_name] = row.domain_uid
+
+        if row.package_name not in domains_map[row.domain_name]:
+            domains_map[row.domain_name][row.package_name] = []
+            package_uids[(row.domain_name, row.package_name)] = row.package_uid
+
+        sc: dict | None = None
+        if row.session_changes:
+            try:
+                sc = json.loads(row.session_changes)
+            except Exception:
+                pass
+
+        domains_map[row.domain_name][row.package_name].append(
+            EvidenceSessionItem(
+                id=row.id or 0,
+                attempt=row.attempt,
+                session_type=row.session_type,
+                session_uid=row.session_uid,
+                sid=row.sid,
+                created_at=row.created_at.isoformat() if row.created_at else "",
+                session_changes=sc,
+            )
+        )
+
+    domains = [
+        DomainEvidenceItem(
+            domain_name=domain_name,
+            domain_uid=domain_uids[domain_name],
+            packages=[
+                PackageEvidenceItem(
+                    package_name=package_name,
+                    package_uid=package_uids[(domain_name, package_name)],
+                    sessions=sessions,
+                )
+                for package_name, sessions in packages_map.items()
+            ],
+        )
+        for domain_name, packages_map in domains_map.items()
+    ]
+
+    return EvidenceHistoryResponse(domains=domains)
 
 
 # DEPRECATED: Use /try-verify instead
@@ -1077,113 +1239,70 @@ async def export_errors(
 @router.get("/ritm/{ritm_number}/session-pdf")
 async def get_session_pdf(
     ritm_number: str,
-    evidence: int = 1,
+    attempt: int | None = None,
     session: SessionData = Depends(get_session_data),
 ) -> Response:
-    """Generate PDF from stored session changes.
-
-    Args:
-        ritm_number: RITM number
-        evidence: Evidence number (1 or 2)
-        session: Current session
-
-    Returns:
-        PDF file
-    """
-    from sqlalchemy import select
-
-    from ..models import RITM
-
+    """Generate PDF evidence. Without attempt: all sessions. With attempt: that attempt only."""
     async with AsyncSession(engine) as db:
-        ritm_result = await db.execute(
-            select(RITM).where(RITM.ritm_number == ritm_number)  # type: ignore[arg-type]
-        )
-        ritm = ritm_result.scalar_one_or_none()
-
-        if not ritm:
+        ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        if not ritm_result.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="RITM not found")
 
-        # Get the appropriate evidence column
-        if evidence == 1:
-            session_changes_json = ritm.session_changes_evidence1
-        elif evidence == 2:
-            session_changes_json = ritm.session_changes_evidence2
-        else:
-            raise HTTPException(status_code=400, detail="Evidence number must be 1 or 2")
+        query = select(RITMEvidenceSession).where(
+            col(RITMEvidenceSession.ritm_number) == ritm_number
+        )
+        if attempt is not None:
+            query = query.where(col(RITMEvidenceSession.attempt) == attempt)
+        query = query.order_by(
+            col(RITMEvidenceSession.domain_name).asc(),
+            col(RITMEvidenceSession.attempt).asc(),
+        )
+        rows_result = await db.execute(query)
+        rows = rows_result.scalars().all()
 
-        if not session_changes_json:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Evidence #{evidence} not available for this RITM",
+    if not rows:
+        raise HTTPException(status_code=400, detail="No evidence sessions found for this RITM")
+
+    combined: dict[str, Any] = {
+        "apply_session_trace": [],
+        "domain_changes": {},
+        "errors": [],
+    }
+    for row in rows:
+        sc: dict[str, Any] = {}
+        if row.session_changes:
+            try:
+                sc = json.loads(row.session_changes)
+            except Exception:
+                pass
+        if row.domain_name not in combined["domain_changes"]:
+            combined["domain_changes"][row.domain_name] = {}
+        combined["domain_changes"][row.domain_name].update(sc)
+        if row.session_uid:
+            combined["apply_session_trace"].append(
+                {
+                    "domain": row.domain_name,
+                    "attempt": row.attempt,
+                    "session_uid": row.session_uid,
+                    "created_at": row.created_at.isoformat() if row.created_at else "",
+                }
             )
 
-        try:
-            session_changes = json.loads(session_changes_json)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse session_changes JSON for RITM {ritm_number}: {e}")
-            raise HTTPException(
-                status_code=500, detail="Failed to parse session changes data"
-            ) from e
-
-    # Generate PDF
     try:
         pdf_generator = get_pdf_generator()
-
-        # Build UID-to-name mapping for section name resolution
         section_uid_to_name: dict[str, str] = {}
-
-        async with CPAIOPSClient(
-            engine=engine,
-            username=session.username,
-            password=session.password,
-            mgmt_ip=settings.api_mgmt,
-        ) as client:
-            mgmt_name = client.get_mgmt_names()[0]
-
-            async with AsyncSession(engine) as db:
-                # Fetch cached sections
-                sections_result = await db.execute(select(CachedSection))
-                sections = sections_result.scalars().all()
-                for s in sections:
-                    section_uid_to_name[s.uid] = s.name
-
-                # Fetch RITM sessions to determine which domains to query
-                from ..models import RITMSession
-
-                sessions_result = await db.execute(
-                    select(RITMSession).where(col(RITMSession.ritm_number) == ritm_number)
-                )
-                ritm_sessions = sessions_result.scalars().all()
-
-                # Fetch access layers for each domain in the sessions
-                for ritm_session in ritm_sessions:
-                    domain_name = ritm_session.domain_name
-                    layers_result = await client.api_call(
-                        mgmt_name=mgmt_name,
-                        domain=domain_name,
-                        command="show-access-layers",
-                        payload={},
-                    )
-                    if layers_result.success and layers_result.data:
-                        for layer in layers_result.data.get("access-layers", []):
-                            layer_uid = layer.get("uid")
-                            layer_name = layer.get("name")
-                            if layer_uid and layer_name:
-                                section_uid_to_name[layer_uid] = layer_name
-
         pdf_bytes = pdf_generator.generate_pdf(
             ritm_number=ritm_number,
-            evidence_number=evidence,
+            evidence_number=1,
             username=session.username,
-            session_changes=session_changes,
+            session_changes=combined,
             section_uid_to_name=section_uid_to_name,
         )
-
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f'attachment; filename="{ritm_number}_evidence{evidence}.pdf"'
+                "Content-Disposition": f'attachment; filename="{ritm_number}_evidence.pdf"'
             },
         )
     except Exception as e:
@@ -1194,103 +1313,64 @@ async def get_session_pdf(
 @router.get("/ritm/{ritm_number}/session-html")
 async def get_session_html(
     ritm_number: str,
-    evidence: int = 1,
+    attempt: int | None = None,
     session: SessionData = Depends(get_session_data),
 ) -> HTMLResponse:
-    """Render HTML evidence from stored session changes.
-
-    Args:
-        ritm_number: RITM number
-        evidence: Evidence number (1 or 2)
-        session: Current session
-
-    Returns:
-        Rendered HTML
-    """
-    from sqlalchemy import select
-
-    from ..models import RITM
-
+    """Render HTML evidence. Without attempt: all sessions. With attempt: that attempt only."""
     async with AsyncSession(engine) as db:
-        ritm_result = await db.execute(
-            select(RITM).where(RITM.ritm_number == ritm_number)  # type: ignore[arg-type]
-        )
-        ritm = ritm_result.scalar_one_or_none()
-
-        if not ritm:
+        ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        if not ritm_result.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="RITM not found")
 
-        if evidence == 1:
-            session_changes_json = ritm.session_changes_evidence1
-        elif evidence == 2:
-            session_changes_json = ritm.session_changes_evidence2
-        else:
-            raise HTTPException(status_code=400, detail="Evidence number must be 1 or 2")
+        query = select(RITMEvidenceSession).where(
+            col(RITMEvidenceSession.ritm_number) == ritm_number
+        )
+        if attempt is not None:
+            query = query.where(col(RITMEvidenceSession.attempt) == attempt)
+        query = query.order_by(
+            col(RITMEvidenceSession.domain_name).asc(),
+            col(RITMEvidenceSession.attempt).asc(),
+        )
+        rows_result = await db.execute(query)
+        rows = rows_result.scalars().all()
 
-        if not session_changes_json:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Evidence #{evidence} not available for this RITM",
+    if not rows:
+        raise HTTPException(status_code=400, detail="No evidence sessions found for this RITM")
+
+    # Build combined session_changes for the evidence renderer
+    combined: dict[str, Any] = {
+        "apply_session_trace": [],
+        "domain_changes": {},
+        "errors": [],
+    }
+    for row in rows:
+        sc: dict[str, Any] = {}
+        if row.session_changes:
+            try:
+                sc = json.loads(row.session_changes)
+            except Exception:
+                pass
+        if row.domain_name not in combined["domain_changes"]:
+            combined["domain_changes"][row.domain_name] = {}
+        combined["domain_changes"][row.domain_name].update(sc)
+        if row.session_uid:
+            combined["apply_session_trace"].append(
+                {
+                    "domain": row.domain_name,
+                    "attempt": row.attempt,
+                    "session_uid": row.session_uid,
+                    "created_at": row.created_at.isoformat() if row.created_at else "",
+                }
             )
-
-        try:
-            session_changes = json.loads(session_changes_json)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse session_changes JSON for RITM {ritm_number}: {e}")
-            raise HTTPException(
-                status_code=500, detail="Failed to parse session changes data"
-            ) from e
 
     try:
         pdf_generator = get_pdf_generator()
-
-        # Build UID-to-name mapping for section name resolution
         section_uid_to_name: dict[str, str] = {}
-
-        async with CPAIOPSClient(
-            engine=engine,
-            username=session.username,
-            password=session.password,
-            mgmt_ip=settings.api_mgmt,
-        ) as client:
-            mgmt_name = client.get_mgmt_names()[0]
-
-            async with AsyncSession(engine) as db:
-                # Fetch cached sections
-                sections_result = await db.execute(select(CachedSection))
-                sections = sections_result.scalars().all()
-                for s in sections:
-                    section_uid_to_name[s.uid] = s.name
-
-                # Fetch RITM sessions to determine which domains to query
-                from ..models import RITMSession
-
-                sessions_result = await db.execute(
-                    select(RITMSession).where(col(RITMSession.ritm_number) == ritm_number)
-                )
-                ritm_sessions = sessions_result.scalars().all()
-
-                # Fetch access layers for each domain in the sessions
-                for ritm_session in ritm_sessions:
-                    domain_name = ritm_session.domain_name
-                    layers_result = await client.api_call(
-                        mgmt_name=mgmt_name,
-                        domain=domain_name,
-                        command="show-access-layers",
-                        payload={},
-                    )
-                    if layers_result.success and layers_result.data:
-                        for layer in layers_result.data.get("access-layers", []):
-                            layer_uid = layer.get("uid")
-                            layer_name = layer.get("name")
-                            if layer_uid and layer_name:
-                                section_uid_to_name[layer_uid] = layer_name
-
         html = pdf_generator.generate_html(
             ritm_number=ritm_number,
-            evidence_number=evidence,
+            evidence_number=1,
             username=session.username,
-            session_changes=session_changes,
+            session_changes=combined,
             section_uid_to_name=section_uid_to_name,
         )
         return HTMLResponse(content=html)

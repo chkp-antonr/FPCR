@@ -43,25 +43,30 @@ async def db_session(test_engine):
 @pytest_asyncio.fixture(scope="function")
 async def async_client(db_session: AsyncSession):
     """Create an async test client."""
-    # Patch the db engine with test engine
     import fa.db
     import fa.routes.ritm
+    import fa.routes.ritm_flow
+    import fa.services.ritm_workflow_service
 
-    original_engine = fa.db.engine
+    original_db_engine = fa.db.engine
+    original_ritm_engine = fa.routes.ritm.engine
+    original_flow_engine = fa.routes.ritm_flow.engine
+    original_service_engine = fa.services.ritm_workflow_service.engine
+
     fa.db.engine = db_session.bind
     fa.routes.ritm.engine = db_session.bind
+    fa.routes.ritm_flow.engine = db_session.bind
+    fa.services.ritm_workflow_service.engine = db_session.bind
 
-    # Create a test session
     session_id = session_manager.create(username="testuser", password="testpass")
 
-    # Use ASGI transport for FastAPI testing
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # Set session cookie
         client.cookies.set("session_id", session_id)
         yield client
 
-    # Cleanup
     session_manager.delete(session_id)
-    fa.db.engine = original_engine
-    fa.routes.ritm.engine = original_engine
+    fa.db.engine = original_db_engine
+    fa.routes.ritm.engine = original_ritm_engine
+    fa.routes.ritm_flow.engine = original_flow_engine
+    fa.services.ritm_workflow_service.engine = original_service_engine

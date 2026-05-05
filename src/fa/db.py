@@ -48,7 +48,9 @@ async def create_ritm_flow_tables() -> None:
                         flow_tables["ritm_created_objects"],
                         flow_tables["ritm_created_rules"],
                         flow_tables["ritm_verification"],
-                        flow_tables["ritm_sessions"],
+                        flow_tables["ritm_editors"],
+                        flow_tables["ritm_reviewers"],
+                        flow_tables["ritm_evidence_sessions"],
                     ],
                 )
             )
@@ -65,7 +67,9 @@ async def create_ritm_flow_tables() -> None:
                         flow_tables["ritm_created_objects"],
                         flow_tables["ritm_created_rules"],
                         flow_tables["ritm_verification"],
-                        flow_tables["ritm_sessions"],
+                        flow_tables["ritm_editors"],
+                        flow_tables["ritm_reviewers"],
+                        flow_tables["ritm_evidence_sessions"],
                     ],
                 )
             )
@@ -76,7 +80,9 @@ async def create_ritm_flow_tables() -> None:
                         flow_tables["ritm_created_objects"],
                         flow_tables["ritm_created_rules"],
                         flow_tables["ritm_verification"],
-                        flow_tables["ritm_sessions"],
+                        flow_tables["ritm_editors"],
+                        flow_tables["ritm_reviewers"],
+                        flow_tables["ritm_evidence_sessions"],
                     ],
                 )
             )

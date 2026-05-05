@@ -213,6 +213,14 @@ This file serves as a directory for AI assistants to find relevant research, pla
   * `src/fa/services/session_changes_pdf.py` - Updated to accept and use UID mapping
   * `src/fa/app.py` - Added arlogi `setup_logging()` initialization
 
+### 2026-04-24: Repository History Sanitization
+
+* **Topic**: Repository cleanup after accidental secret file commit in historical revisions.
+* **Status**: ✅ Completed (except protected/default-branch restrictions on external remotes)
+* **Tracked Results**: `docs/internal/features/260424-repo-history-sanitization/README.md`
+* **Raw Logs (Ignored)**: `docs/_AI_/260424-repo-history-sanitization/`
+* **Summary**: Squashed history to a single commit (`73bcee6`) and force-updated local/cpar/gitea master branches to the clean tip. Removed feature branches from cpar and gitea where allowed. Azure cleanup was deferred due to branch protection; gitea `dev` deletion remains blocked until default branch is switched from `dev` to `master`.
+
 ---
 
 ## 🚀 RITM Workflow

@@ -54,6 +54,9 @@ All notable changes to this project will be documented in this file.
 - Added section-row-in-body table layout (column headers remain the first row)
 - Added workflow activity logging card in RITM edit flow for user-visible plan/apply/verify/reset progress
 - Added backend access-rule enrichment (`show-access-rule` + `show-access-rulebase`) to improve section/rule metadata and full rule field visibility
+- Repository history sanitized to single-commit lineage (`73bcee6`) for local branch state, `cpar/master`, and `gitea/master`
+- Removed remote branch `feature/ritm` from both `cpar` and `gitea`
+- Deferred Azure history rewrite because branch policy blocks force pushes to `master`
 
 ### Fixed
 

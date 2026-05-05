@@ -45,6 +45,7 @@ The `cached_sections` table only stores sections, not layers. When a rule refere
 ## Result
 
 Section names now display correctly (e.g., "**pyTestPolicy Network**" instead of "Section: Rules") across all evidence generation paths:
+
 - Try & Verify workflow
 - Recreate Evidence button
 - Session PDF download (peer review view)

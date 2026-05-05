@@ -3,7 +3,6 @@
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -17,14 +16,15 @@ from ..models import (
     RITM,
     Policy,
     PolicyItem,
-    PublishResponse,
-    RITMCreatedRule,
     RITMCreateRequest,
+    RITMEditor,
     RITMItem,
     RITMListResponse,
+    RITMReviewer,
     RITMStatus,
     RITMUpdateRequest,
     RITMWithPolicies,
+    ReviewerItem,
 )
 from ..session import SessionData, session_manager
 
@@ -47,9 +47,26 @@ async def get_session_data(request: Request) -> SessionData:
     return session
 
 
-def _ritm_to_item(ritm: RITM) -> RITMItem:
-    """Convert RITM model to API item."""
+async def _ritm_to_item(db: AsyncSession, ritm: RITM) -> RITMItem:
+    """Convert RITM model to API item, loading editors and reviewers."""
     import json
+
+    editors_result = await db.execute(
+        select(RITMEditor).where(col(RITMEditor.ritm_number) == ritm.ritm_number)
+    )
+    editors = [e.username for e in editors_result.scalars().all()]
+
+    reviewers_result = await db.execute(
+        select(RITMReviewer).where(col(RITMReviewer.ritm_number) == ritm.ritm_number)
+    )
+    reviewers = [
+        ReviewerItem(
+            username=r.username,
+            action=r.action,
+            acted_at=r.acted_at.isoformat() if r.acted_at else "",
+        )
+        for r in reviewers_result.scalars().all()
+    ]
 
     return RITMItem(
         ritm_number=ritm.ritm_number,
@@ -62,10 +79,13 @@ def _ritm_to_item(ritm: RITM) -> RITMItem:
         status=ritm.status,
         approver_locked_by=ritm.approver_locked_by,
         approver_locked_at=ritm.approver_locked_at.isoformat() if ritm.approver_locked_at else None,
+        editor_locked_by=ritm.editor_locked_by,
+        editor_locked_at=ritm.editor_locked_at.isoformat() if ritm.editor_locked_at else None,
         source_ips=json.loads(ritm.source_ips) if ritm.source_ips else None,
         dest_ips=json.loads(ritm.dest_ips) if ritm.dest_ips else None,
         services=json.loads(ritm.services) if ritm.services else None,
-        session_changes_evidence1=ritm.session_changes_evidence1,
+        editors=editors,
+        reviewers=reviewers,
     )
 
 
@@ -94,165 +114,12 @@ def _policy_to_item(policy: Policy) -> PolicyItem:
     )
 
 
-def _is_uuid_like(value: str) -> bool:
-    return bool(
-        re.match(
-            r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-            value,
-        )
-    )
-
-
-def _normalize_session_changes_evidence(
-    session_changes_json: str | None,
-    policies: list[Policy],
-    created_rules: list[RITMCreatedRule],
-) -> str | None:
-    """Backfill section/rule metadata for older stored session_changes payloads."""
-    if not session_changes_json:
-        return session_changes_json
-
-    import json
-
-    try:
-        data: dict[str, Any] = json.loads(session_changes_json)
-    except Exception:
-        return session_changes_json
-
-    domain_changes = data.get("domain_changes")
-    if not isinstance(domain_changes, dict):
-        return session_changes_json
-
-    rules_by_uid = {r.rule_uid: r for r in created_rules if r.rule_uid}
-
-    policies_by_combo: dict[tuple[str, str], list[Policy]] = {}
-    for policy in policies:
-        key = (policy.domain_uid, policy.package_uid)
-        policies_by_combo.setdefault(key, []).append(policy)
-
-    changed = False
-
-    for domain_data in domain_changes.values():
-        if not isinstance(domain_data, dict):
-            continue
-        tasks = domain_data.get("tasks", [])
-        if not isinstance(tasks, list):
-            continue
-
-        for task in tasks:
-            if not isinstance(task, dict):
-                continue
-            task_details = task.get("task-details", [])
-            if not isinstance(task_details, list):
-                continue
-
-            for detail in task_details:
-                if not isinstance(detail, dict):
-                    continue
-                changes = detail.get("changes", [])
-                if not isinstance(changes, list):
-                    continue
-
-                for change in changes:
-                    if not isinstance(change, dict):
-                        continue
-                    operations = change.get("operations", {})
-                    if not isinstance(operations, dict):
-                        continue
-
-                    for bucket in ("added-objects", "modified-objects", "deleted-objects"):
-                        entries = operations.get(bucket, [])
-                        if not isinstance(entries, list):
-                            continue
-
-                        for obj in entries:
-                            if not isinstance(obj, dict) or obj.get("type") != "access-rule":
-                                continue
-
-                            rule_uid = obj.get("uid")
-                            rule_name = obj.get("name")
-
-                            current_section = (
-                                obj.get("section-name")
-                                or obj.get("section_name")
-                                or obj.get("access-section-name")
-                                or obj.get("layer-name")
-                                or obj.get("layer_name")
-                                or obj.get("layer")
-                            )
-                            section_is_missing_or_uid = not (
-                                isinstance(current_section, str)
-                                and current_section.strip()
-                                and not _is_uuid_like(current_section.strip())
-                            )
-
-                            if isinstance(rule_uid, str) and rule_uid in rules_by_uid:
-                                created_meta = rules_by_uid[rule_uid]
-
-                                if (
-                                    obj.get("rule-number") is None
-                                    and created_meta.rule_number is not None
-                                ):
-                                    obj["rule-number"] = created_meta.rule_number
-                                    changed = True
-
-                                combo = (created_meta.domain_uid, created_meta.package_uid)
-                                combo_policies = policies_by_combo.get(combo, [])
-                                selected_policy: Policy | None = None
-
-                                if isinstance(rule_name, str) and rule_name.strip():
-                                    for p in combo_policies:
-                                        if p.rule_name == rule_name:
-                                            selected_policy = p
-                                            break
-
-                                if selected_policy is None and len(combo_policies) == 1:
-                                    selected_policy = combo_policies[0]
-
-                                if selected_policy is not None:
-                                    if (
-                                        section_is_missing_or_uid
-                                        and selected_policy.section_name
-                                        and selected_policy.section_name.strip()
-                                    ):
-                                        obj["section-name"] = selected_policy.section_name.strip()
-                                        changed = True
-                                        section_is_missing_or_uid = False
-
-                                    if (
-                                        selected_policy.package_name
-                                        and selected_policy.package_name.strip()
-                                        and (
-                                            not isinstance(obj.get("package-name"), str)
-                                            or not obj.get("package-name", "").strip()
-                                        )
-                                    ):
-                                        obj["package-name"] = selected_policy.package_name.strip()
-                                        changed = True
-
-                            if section_is_missing_or_uid:
-                                layer_name = obj.get("layer-name") or obj.get("layer_name")
-                                if (
-                                    isinstance(layer_name, str)
-                                    and layer_name.strip()
-                                    and not _is_uuid_like(layer_name.strip())
-                                ):
-                                    obj["section-name"] = layer_name.strip()
-                                    changed = True
-
-    if not changed:
-        return session_changes_json
-
-    return json.dumps(data)
-
-
 @router.post("/ritm")
 async def create_ritm(
     request: RITMCreateRequest,
     session: SessionData = Depends(get_session_data),
 ) -> RITMItem:
-    """Create a new RITM."""
-    # Validate RITM number format
+    """Create a new RITM. Creator is automatically added to editors list."""
     if not RITM_NUMBER_PATTERN.match(request.ritm_number):
         raise HTTPException(
             status_code=400,
@@ -260,7 +127,6 @@ async def create_ritm(
         )
 
     async with AsyncSession(engine) as db:
-        # Check for duplicate
         existing = await db.execute(
             select(RITM).where(col(RITM.ritm_number) == request.ritm_number)
         )
@@ -269,7 +135,6 @@ async def create_ritm(
                 status_code=400, detail=f"RITM {request.ritm_number} already exists"
             )
 
-        # Create new RITM
         ritm = RITM(
             ritm_number=request.ritm_number,
             username_created=session.username,
@@ -277,11 +142,18 @@ async def create_ritm(
             status=RITMStatus.WORK_IN_PROGRESS,
         )
         db.add(ritm)
+        db.add(
+            RITMEditor(
+                ritm_number=request.ritm_number,
+                username=session.username,
+                added_at=datetime.now(UTC),
+            )
+        )
         await db.commit()
         await db.refresh(ritm)
 
         logger.info(f"Created RITM {request.ritm_number} by {session.username}")
-        return _ritm_to_item(ritm)
+        return await _ritm_to_item(db, ritm)
 
 
 @router.get("/ritm")
@@ -293,18 +165,16 @@ async def list_ritms(
     """List all RITMs with optional filtering."""
     async with AsyncSession(engine) as db:
         query = select(RITM)
-
         if status is not None:
             query = query.where(col(RITM.status) == status)
         if username is not None:
             query = query.where(col(RITM.username_created) == username)
-
         query = query.order_by(col(RITM.date_created).desc())
-
         result = await db.execute(query)
         ritms = result.scalars().all()
 
-        return RITMListResponse(ritms=[_ritm_to_item(r) for r in ritms])
+        items = [await _ritm_to_item(db, r) for r in ritms]
+        return RITMListResponse(ritms=items)
 
 
 @router.get("/ritm/{ritm_number}")
@@ -314,34 +184,19 @@ async def get_ritm(
 ) -> RITMWithPolicies:
     """Get a single RITM with its policies."""
     async with AsyncSession(engine) as db:
-        # Get RITM
         result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
         ritm = result.scalar_one_or_none()
         if not ritm:
             raise HTTPException(status_code=404, detail="RITM not found")
 
-        # Get policies
         policies_result = await db.execute(
             select(Policy).where(col(Policy.ritm_number) == ritm_number)
         )
         policies = list(policies_result.scalars().all())
 
-        created_rules_result = await db.execute(
-            select(RITMCreatedRule).where(col(RITMCreatedRule.ritm_number) == ritm_number)
-        )
-        created_rules = list(created_rules_result.scalars().all())
-
-        normalized = _normalize_session_changes_evidence(
-            ritm.session_changes_evidence1,
-            policies,
-            created_rules,
-        )
-        if normalized != ritm.session_changes_evidence1:
-            ritm.session_changes_evidence1 = normalized
-            await db.commit()
-
         return RITMWithPolicies(
-            ritm=_ritm_to_item(ritm), policies=[_policy_to_item(p) for p in policies]
+            ritm=await _ritm_to_item(db, ritm),
+            policies=[_policy_to_item(p) for p in policies],
         )
 
 
@@ -353,46 +208,73 @@ async def update_ritm(
 ) -> RITMItem:
     """Update RITM status and/or feedback."""
     async with AsyncSession(engine) as db:
-        # Get RITM
         result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
         ritm = result.scalar_one_or_none()
         if not ritm:
             raise HTTPException(status_code=404, detail="RITM not found")
 
-        # Handle status changes
         if request.status is not None:
-            # Validate status transition
-            if request.status == RITMStatus.APPROVED:
-                # Cannot approve own RITM
-                if ritm.username_created == session.username:
-                    raise HTTPException(status_code=400, detail="You cannot approve your own RITM")
-                # Must be in ready state
+            if request.status == RITMStatus.READY_FOR_APPROVAL:
+                # Must be a registered editor AND currently hold the editor lock
+                editor_result = await db.execute(
+                    select(RITMEditor).where(
+                        col(RITMEditor.ritm_number) == ritm_number,
+                        col(RITMEditor.username) == session.username,
+                    )
+                )
+                if not editor_result.scalar_one_or_none():
+                    raise HTTPException(status_code=400, detail="Only editors can submit for approval")
+                if ritm.editor_locked_by != session.username:
+                    raise HTTPException(
+                        status_code=400, detail="You must hold the editor lock to submit for approval"
+                    )
+                ritm.date_updated = datetime.now(UTC)
+
+            elif request.status == RITMStatus.APPROVED:
+                # Must NOT be in editors list
+                editor_result = await db.execute(
+                    select(RITMEditor).where(
+                        col(RITMEditor.ritm_number) == ritm_number,
+                        col(RITMEditor.username) == session.username,
+                    )
+                )
+                if editor_result.scalar_one_or_none():
+                    raise HTTPException(
+                        status_code=400, detail="Editors cannot approve their own RITM"
+                    )
                 if ritm.status != RITMStatus.READY_FOR_APPROVAL:
                     raise HTTPException(status_code=400, detail="RITM must be ready for approval")
                 ritm.date_approved = datetime.now(UTC)
                 ritm.username_approved = session.username
-                # Clear approval lock
                 ritm.approver_locked_by = None
                 ritm.approver_locked_at = None
-
-            elif request.status == RITMStatus.READY_FOR_APPROVAL:
-                # Only creator can submit for approval
-                if ritm.username_created != session.username:
-                    raise HTTPException(
-                        status_code=400, detail="Only the creator can submit for approval"
+                db.add(
+                    RITMReviewer(
+                        ritm_number=ritm_number,
+                        username=session.username,
+                        action="approved",
+                        acted_at=datetime.now(UTC),
                     )
-                ritm.date_updated = datetime.now(UTC)
+                )
 
             elif request.status == RITMStatus.WORK_IN_PROGRESS:
-                # Returning for changes - requires feedback
                 if not request.feedback:
                     raise HTTPException(
                         status_code=400, detail="Feedback is required when returning for changes"
                     )
+                db.add(
+                    RITMReviewer(
+                        ritm_number=ritm_number,
+                        username=session.username,
+                        action="rejected",
+                        acted_at=datetime.now(UTC),
+                    )
+                )
+                ritm.editor_locked_by = None
+                ritm.editor_locked_at = None
 
             ritm.status = request.status
 
-        # Handle feedback
         if request.feedback is not None:
             ritm.feedback = request.feedback
 
@@ -400,14 +282,14 @@ async def update_ritm(
         await db.refresh(ritm)
 
         logger.info(f"Updated RITM {ritm_number} by {session.username}")
-        return _ritm_to_item(ritm)
+        return await _ritm_to_item(db, ritm)
 
 
 @router.post("/ritm/{ritm_number}/policy")
 async def save_policy(
     ritm_number: str,
     policies: list[PolicyItem],
-    _session: SessionData = Depends(get_session_data),
+    session: SessionData = Depends(get_session_data),
 ) -> dict[str, str]:
     """Save policy rules for a RITM."""
     import json
@@ -443,6 +325,23 @@ async def save_policy(
                 services=json.dumps(policy_item.services),
             )
             db.add(policy)
+
+        # If user holds editor lock, record them as a co-editor (ON CONFLICT IGNORE)
+        if ritm.editor_locked_by == session.username:
+            existing_editor = await db.execute(
+                select(RITMEditor).where(
+                    col(RITMEditor.ritm_number) == ritm_number,
+                    col(RITMEditor.username) == session.username,
+                )
+            )
+            if not existing_editor.scalar_one_or_none():
+                db.add(
+                    RITMEditor(
+                        ritm_number=ritm_number,
+                        username=session.username,
+                        added_at=datetime.now(UTC),
+                    )
+                )
 
         await db.commit()
 
@@ -526,7 +425,7 @@ async def acquire_approval_lock(
         await db.refresh(ritm)
 
         logger.info(f"Approval lock acquired for RITM {ritm_number} by {session.username}")
-        return _ritm_to_item(ritm)
+        return await _ritm_to_item(db, ritm)
 
 
 @router.post("/ritm/{ritm_number}/unlock")
@@ -553,69 +452,77 @@ async def release_approval_lock(
         await db.refresh(ritm)
 
         logger.info(f"Approval lock released for RITM {ritm_number}")
-        return _ritm_to_item(ritm)
+        return await _ritm_to_item(db, ritm)
 
 
-@router.post("/ritm/{ritm_number}/publish")
-async def publish_ritm(
+@router.post("/ritm/{ritm_number}/editor-lock")
+async def acquire_editor_lock(
     ritm_number: str,
-    _session: SessionData = Depends(get_session_data),
-) -> PublishResponse:
-    """Publish an approved RITM to Check Point."""
-    import json
-
+    session: SessionData = Depends(get_session_data),
+) -> RITMItem:
+    """Acquire editor lock. Fails if user is a reviewer or lock is held by another."""
     async with AsyncSession(engine) as db:
-        # Get RITM
         result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
         ritm = result.scalar_one_or_none()
         if not ritm:
             raise HTTPException(status_code=404, detail="RITM not found")
 
-        # Must be approved
-        if ritm.status != RITMStatus.APPROVED:
-            raise HTTPException(status_code=400, detail="RITM must be approved before publishing")
-
-        # Get policies
-        policies_result = await db.execute(
-            select(Policy).where(col(Policy.ritm_number) == ritm_number)
-        )
-        policies = policies_result.scalars().all()
-
-        if not policies:
-            raise HTTPException(status_code=400, detail="RITM has no policies to publish")
-
-        # Convert to domains2 batch format
-        rules_to_create = []
-        for policy in policies:
-            rules_to_create.append(
-                {
-                    "domain_uid": policy.domain_uid,
-                    "package_uid": policy.package_uid,
-                    "section_uid": policy.section_uid,
-                    "position": {
-                        "type": policy.position_type,
-                        "custom_number": policy.position_number,
-                    },
-                    "action": policy.action,
-                    "track": policy.track,
-                    "source_ips": json.loads(policy.source_ips),
-                    "dest_ips": json.loads(policy.dest_ips),
-                    "services": json.loads(policy.services),
-                }
+        # Reviewers cannot become editors
+        reviewer_result = await db.execute(
+            select(RITMReviewer).where(
+                col(RITMReviewer.ritm_number) == ritm_number,
+                col(RITMReviewer.username) == session.username,
             )
+        )
+        if reviewer_result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Reviewer cannot acquire editor lock")
 
-        # TODO: Call actual Check Point API via domains2 endpoint
-        # For now, mock the response
-        logger.info(f"Publishing {len(rules_to_create)} rules for RITM {ritm_number}")
+        # Check existing lock
+        if ritm.editor_locked_by:
+            locked_at = ritm.editor_locked_at
+            if locked_at:
+                if locked_at.tzinfo is None:
+                    locked_at = locked_at.replace(tzinfo=UTC)
+                if datetime.now(UTC) - locked_at < timedelta(minutes=settings.approval_lock_minutes):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"RITM is locked by {ritm.editor_locked_by}",
+                    )
+                logger.info(f"Editor lock expired for RITM {ritm_number}")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"RITM is locked by {ritm.editor_locked_by}",
+                )
 
-        # On success, update status to completed
-        ritm.status = RITMStatus.COMPLETED
+        ritm.editor_locked_by = session.username
+        ritm.editor_locked_at = datetime.now(UTC)
         await db.commit()
         await db.refresh(ritm)
 
-        return PublishResponse(
-            success=True,
-            message=f"Published {len(rules_to_create)} rules for RITM {ritm_number}",
-            created=len(rules_to_create),
-            errors=[],
-        )
+        logger.info(f"Editor lock acquired for RITM {ritm_number} by {session.username}")
+        return await _ritm_to_item(db, ritm)
+
+
+@router.post("/ritm/{ritm_number}/editor-unlock")
+async def release_editor_lock(
+    ritm_number: str,
+    session: SessionData = Depends(get_session_data),
+) -> RITMItem:
+    """Release editor lock. Only the lock holder can release."""
+    async with AsyncSession(engine) as db:
+        result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        ritm = result.scalar_one_or_none()
+        if not ritm:
+            raise HTTPException(status_code=404, detail="RITM not found")
+
+        if ritm.editor_locked_by != session.username:
+            raise HTTPException(status_code=400, detail="You did not acquire this lock")
+
+        ritm.editor_locked_by = None
+        ritm.editor_locked_at = None
+        await db.commit()
+        await db.refresh(ritm)
+
+        logger.info(f"Editor lock released for RITM {ritm_number} by {session.username}")
+        return await _ritm_to_item(db, ritm)

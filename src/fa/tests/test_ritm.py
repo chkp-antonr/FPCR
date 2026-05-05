@@ -138,6 +138,7 @@ async def test_submit_for_approval(async_client: AsyncClient):
         "/api/v1/ritm",
         json={"ritm_number": "RITM3333333"},
     )
+    await async_client.post("/api/v1/ritm/RITM3333333/editor-lock")  # required in v2
 
     # Submit for approval
     response = await async_client.put(
@@ -157,6 +158,7 @@ async def test_acquire_lock(async_client: AsyncClient):
         "/api/v1/ritm",
         json={"ritm_number": "RITM4444444"},
     )
+    await async_client.post("/api/v1/ritm/RITM4444444/editor-lock")
     await async_client.put(
         "/api/v1/ritm/RITM4444444",
         json={"status": RITMStatus.READY_FOR_APPROVAL},
@@ -180,6 +182,7 @@ async def test_acquire_lock_already_locked_fails(async_client: AsyncClient):
         "/api/v1/ritm",
         json={"ritm_number": "RITM5555555"},
     )
+    await async_client.post("/api/v1/ritm/RITM5555555/editor-lock")
     await async_client.put(
         "/api/v1/ritm/RITM5555555",
         json={"status": RITMStatus.READY_FOR_APPROVAL},
@@ -203,6 +206,7 @@ async def test_release_lock(async_client: AsyncClient):
         "/api/v1/ritm",
         json={"ritm_number": "RITM6666666"},
     )
+    await async_client.post("/api/v1/ritm/RITM6666666/editor-lock")
     await async_client.put(
         "/api/v1/ritm/RITM6666666",
         json={"status": RITMStatus.READY_FOR_APPROVAL},
@@ -229,18 +233,19 @@ async def test_approve_ritm(async_client: AsyncClient):
         "/api/v1/ritm",
         json={"ritm_number": "RITM7777777"},
     )
+    await async_client.post("/api/v1/ritm/RITM7777777/editor-lock")
     await async_client.put(
         "/api/v1/ritm/RITM7777777",
         json={"status": RITMStatus.READY_FOR_APPROVAL},
     )
 
-    # Approve - this will fail because same user can't approve own RITM
+    # Approve - this will fail because editors cannot approve
     response = await async_client.put(
         "/api/v1/ritm/RITM7777777",
         json={"status": RITMStatus.APPROVED},
     )
     assert response.status_code == 400
-    assert "cannot approve your own RITM" in response.json()["detail"]
+    assert "cannot approve" in response.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -251,6 +256,7 @@ async def test_return_ritm_with_feedback(async_client: AsyncClient):
         "/api/v1/ritm",
         json={"ritm_number": "RITM8888888"},
     )
+    await async_client.post("/api/v1/ritm/RITM8888888/editor-lock")
     await async_client.put(
         "/api/v1/ritm/RITM8888888",
         json={"status": RITMStatus.READY_FOR_APPROVAL},
@@ -315,7 +321,8 @@ async def test_full_ritm_workflow(async_client: AsyncClient, db_session: AsyncSe
 
     assert json.loads(policy.source_ips) == ["192.168.1.1"]
 
-    # Step 3: Submit for approval
+    # Step 3: Acquire editor lock and submit for approval
+    await async_client.post(f"/api/v1/ritm/{ritm_number}/editor-lock")
     response = await async_client.put(
         f"/api/v1/ritm/{ritm_number}",
         json={"status": RITMStatus.READY_FOR_APPROVAL},
@@ -329,19 +336,19 @@ async def test_full_ritm_workflow(async_client: AsyncClient, db_session: AsyncSe
     assert ritm.date_updated is not None
     assert ritm.status == RITMStatus.READY_FOR_APPROVAL
 
-    # Step 4: Acquire lock
+    # Step 4: Acquire approval lock
     response = await async_client.post(
         f"/api/v1/ritm/{ritm_number}/lock",
     )
     assert response.status_code == 200
 
-    # Step 5: Attempting to approve own RITM should fail
+    # Step 5: Attempting to approve as an editor should fail
     response = await async_client.put(
         f"/api/v1/ritm/{ritm_number}",
         json={"status": RITMStatus.APPROVED},
     )
     assert response.status_code == 400
-    assert "cannot approve your own RITM" in response.json()["detail"]
+    assert "cannot approve" in response.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -418,76 +425,6 @@ async def test_generate_evidence_uses_policy_table_when_no_created_objects(
 
 
 @pytest.mark.asyncio
-async def test_session_html_returns_rendered_html_from_stored_evidence(
-    async_client: AsyncClient,
-    db_session: AsyncSession,
-    test_engine,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """session-html should render HTML from stored session_changes evidence."""
-    import json
-
-    ritm_number = "RITM2026222"
-
-    create_resp = await async_client.post(
-        "/api/v1/ritm",
-        json={"ritm_number": ritm_number},
-    )
-    assert create_resp.status_code == 200
-
-    ritm_result = await db_session.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
-    ritm = ritm_result.scalar_one()
-
-    ritm.session_changes_evidence1 = json.dumps(
-        {
-            "domain_changes": {
-                "General": {
-                    "tasks": [
-                        {
-                            "task-details": [
-                                {
-                                    "changes": [
-                                        {
-                                            "operations": {
-                                                "added-objects": [
-                                                    {
-                                                        "type": "access-rule",
-                                                        "rule-number": 1,
-                                                        "name": "Allow HTTPS",
-                                                        "source": [{"name": "1.1.1.1"}],
-                                                        "destination": [{"name": "2.2.2.2"}],
-                                                        "service": [{"name": "https"}],
-                                                        "action": {"name": "Accept"},
-                                                        "track": {"type": {"name": "Log"}},
-                                                        "layer": {"name": "Egress"},
-                                                        "package": "Standard",
-                                                    }
-                                                ]
-                                            }
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    await db_session.commit()
-
-    import fa.routes.ritm_flow as ritm_flow
-
-    monkeypatch.setattr(ritm_flow, "engine", test_engine)
-
-    response = await async_client.get(f"/api/v1/ritm/{ritm_number}/session-html?evidence=1")
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-    assert f"Apply Results: RITM {ritm_number} - Evidence #1" in response.text
-    assert "Section: Egress" in response.text
-
-
-@pytest.mark.asyncio
 async def test_plan_yaml_generated_by_backend(
     async_client: AsyncClient,
     test_engine,
@@ -542,161 +479,6 @@ async def test_plan_yaml_generated_by_backend(
 
 
 @pytest.mark.asyncio
-async def test_apply_returns_domain_sessions_and_uses_package_name_fallback(
-    async_client: AsyncClient,
-    test_engine,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Apply should prefetch layers and choose the current package domain layer over Global."""
-    ritm_number = "RITM7654321"
-
-    create_resp = await async_client.post(
-        "/api/v1/ritm",
-        json={"ritm_number": ritm_number},
-    )
-    assert create_resp.status_code == 200
-
-    policy_payload = [
-        {
-            "ritm_number": ritm_number,
-            "comments": f"{ritm_number} #2026-04-21#",
-            "rule_name": ritm_number,
-            "domain_uid": "domain-general-uid",
-            "domain_name": "General",
-            "package_uid": "missing-package-uid",
-            "package_name": "Standard",
-            "section_uid": "section-egress-uid",
-            "section_name": "Egress",
-            "position_type": "bottom",
-            "action": "accept",
-            "track": "log",
-            "source_ips": ["1.1.1.1", "2.2.2.2"],
-            "dest_ips": ["5.5.5.5", "10.192.10.0/24"],
-            "services": ["https"],
-        }
-    ]
-    save_resp = await async_client.post(
-        f"/api/v1/ritm/{ritm_number}/policy",
-        json=policy_payload,
-    )
-    assert save_resp.status_code == 200
-
-    import cpcrud.rule_manager as rule_manager_module
-    import fa.routes.ritm_flow as ritm_flow
-
-    monkeypatch.setattr(ritm_flow, "engine", test_engine)
-
-    captured_layers: list[str] = []
-
-    class DummyMatcher:
-        def __init__(self, client):
-            self.client = client
-
-        async def match_and_create_objects(
-            self,
-            inputs,
-            domain_uid,
-            domain_name,
-            create_missing,
-        ):
-            return [
-                {
-                    "input": value,
-                    "created": True,
-                    "object_uid": f"uid-{value}",
-                    "object_type": "host",
-                    "object_name": value,
-                }
-                for value in inputs
-            ]
-
-    class DummyRuleManager:
-        def __init__(self, client):
-            self.client = client
-
-        async def add(self, mgmt_name, domain, rule_type, data):
-            captured_layers.append(data["layer"])
-            return {"success": [{"uid": "rule-uid-1", "rule-number": 101}]}
-
-    class DummyClient:
-        def __init__(self, *args, **kwargs):
-            self.cache = self
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        def get_mgmt_names(self):
-            return ["mgmt-test"]
-
-        async def get_sid(self, mgmt_name, domain):
-            if domain == "General":
-                return SimpleNamespace(sid="sid-general-apply")
-            return None
-
-        async def get_uid_by_sid(self, sid):
-            if sid == "sid-general-apply":
-                return "uid-general-apply"
-            return None
-
-        async def api_call(self, mgmt_name, command, domain="", **kwargs):
-            if command == "show-package":
-                return SimpleNamespace(
-                    success=True,
-                    data={
-                        "access-layer": "global-network-layer",
-                        "access-layers": [
-                            {
-                                "uid": "global-network-layer",
-                                "name": "Network",
-                                "domain": {"uid": "global-domain-uid", "name": "Global"},
-                            },
-                            {
-                                "uid": "current-domain-network-layer",
-                                "name": "Network",
-                                "domain": {"uid": "domain-general-uid", "name": "General"},
-                            },
-                        ],
-                    },
-                    message="",
-                    code="",
-                )
-
-            assert command == "show-changes"
-            return SimpleNamespace(
-                success=True,
-                data={"requested-domain": domain, "tasks": []},
-                message="",
-                code="",
-            )
-
-    monkeypatch.setattr(ritm_flow, "ObjectMatcher", DummyMatcher)
-    monkeypatch.setattr(ritm_flow, "CPAIOPSClient", DummyClient)
-    monkeypatch.setattr(rule_manager_module, "CheckPointRuleManager", DummyRuleManager)
-
-    apply_resp = await async_client.post(f"/api/v1/ritm/{ritm_number}/apply")
-    assert apply_resp.status_code == 200
-
-    payload = apply_resp.json()
-    assert payload["rules_created"] == 1
-    assert captured_layers == ["current-domain-network-layer"]
-    assert payload["session_changes"]["apply_sessions"]["General"] == "sid-general-apply"
-    assert payload["session_changes"]["apply_session_trace"] == [
-        {"domain": "General", "sid": "sid-general-apply", "session_uid": "uid-general-apply"}
-    ]
-    assert payload["session_changes"]["show_changes_requests"]["General"] == {
-        "mgmt_name": "mgmt-test",
-        "domain": "General",
-        "command": "show-changes",
-        "details_level": "full",
-        "payload": {"to-session": "uid-general-apply"},
-    }
-    assert payload["session_changes"]["domain_changes"]["General"]["requested-domain"] == "General"
-
-
-@pytest.mark.asyncio
 async def test_list_ritms_by_status(async_client: AsyncClient):
     """Test filtering RITMs by status."""
     # Create RITMs with different statuses
@@ -709,7 +491,8 @@ async def test_list_ritms_by_status(async_client: AsyncClient):
         json={"ritm_number": "RITM0000002"},
     )
 
-    # Submit one for approval
+    # Submit one for approval (requires editor lock in v2)
+    await async_client.post("/api/v1/ritm/RITM0000002/editor-lock")
     await async_client.put(
         "/api/v1/ritm/RITM0000002",
         json={"status": RITMStatus.READY_FOR_APPROVAL},
@@ -723,3 +506,275 @@ async def test_list_ritms_by_status(async_client: AsyncClient):
     ritms = response.json()["ritms"]
     # Should only include RITM0000002
     assert any(r["ritm_number"] == "RITM0000002" for r in ritms)
+
+
+@pytest.mark.asyncio
+async def test_create_ritm_returns_editors_list(async_client: AsyncClient):
+    """Creator is automatically added to editors list on creation."""
+    response = await async_client.post(
+        "/api/v1/ritm",
+        json={"ritm_number": "RITM0000001"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["editors"] == ["testuser"]
+    assert data["reviewers"] == []
+    assert data["editor_locked_by"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_ritm_returns_editors_and_reviewers(async_client: AsyncClient):
+    """GET /ritm/{number} includes editors and reviewers lists."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000002"})
+    response = await async_client.get("/api/v1/ritm/RITM0000002")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ritm"]["editors"] == ["testuser"]
+    assert data["ritm"]["reviewers"] == []
+
+
+@pytest.mark.asyncio
+async def test_acquire_editor_lock(async_client: AsyncClient):
+    """Engineer can acquire editor lock."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000010"})
+    response = await async_client.post("/api/v1/ritm/RITM0000010/editor-lock")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["editor_locked_by"] == "testuser"
+    assert data["editor_locked_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_acquire_editor_lock_already_locked_fails(async_client: AsyncClient):
+    """Cannot acquire editor lock when another user holds it (simulated via direct DB)."""
+    from datetime import UTC, datetime, timedelta
+    from sqlalchemy.ext.asyncio import AsyncSession
+    import fa.routes.ritm as ritm_module
+    from fa.models import RITM
+    from sqlalchemy import select
+    from sqlmodel import col
+
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000011"})
+    # Manually set editor lock to simulate another user
+    async with AsyncSession(ritm_module.engine) as db:
+        result = await db.execute(select(RITM).where(col(RITM.ritm_number) == "RITM0000011"))
+        ritm = result.scalar_one()
+        ritm.editor_locked_by = "otheruser"
+        ritm.editor_locked_at = datetime.now(UTC)
+        await db.commit()
+
+    response = await async_client.post("/api/v1/ritm/RITM0000011/editor-lock")
+    assert response.status_code == 400
+    assert "locked by" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_release_editor_lock(async_client: AsyncClient):
+    """Lock holder can release editor lock."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000012"})
+    await async_client.post("/api/v1/ritm/RITM0000012/editor-lock")
+    response = await async_client.post("/api/v1/ritm/RITM0000012/editor-unlock")
+    assert response.status_code == 200
+    assert response.json()["editor_locked_by"] is None
+
+
+@pytest.mark.asyncio
+async def test_reviewer_cannot_acquire_editor_lock(async_client: AsyncClient):
+    """A user who has reviewed this RITM cannot acquire the editor lock."""
+    from datetime import UTC, datetime
+    from sqlalchemy.ext.asyncio import AsyncSession
+    import fa.routes.ritm as ritm_module
+    from fa.models import RITMReviewer
+    from sqlalchemy import select
+    from sqlmodel import col
+
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000013"})
+    # Manually add testuser as reviewer
+    async with AsyncSession(ritm_module.engine) as db:
+        db.add(RITMReviewer(
+            ritm_number="RITM0000013",
+            username="testuser",
+            action="rejected",
+            acted_at=datetime.now(UTC),
+        ))
+        await db.commit()
+
+    response = await async_client.post("/api/v1/ritm/RITM0000013/editor-lock")
+    assert response.status_code == 400
+    assert "Reviewer" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_save_policy_with_editor_lock_adds_to_editors(async_client: AsyncClient):
+    """Saving a policy while holding editor lock adds user to editors list."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000020"})
+    await async_client.post("/api/v1/ritm/RITM0000020/editor-lock")
+
+    policy = {
+        "ritm_number": "RITM0000020",
+        "comments": "test",
+        "rule_name": "RITM0000020",
+        "domain_uid": "d1",
+        "domain_name": "Domain1",
+        "package_uid": "p1",
+        "package_name": "Package1",
+        "section_uid": None,
+        "section_name": None,
+        "position_type": "bottom",
+        "action": "accept",
+        "track": "log",
+        "source_ips": ["10.0.0.1"],
+        "dest_ips": ["10.0.0.2"],
+        "services": ["https"],
+    }
+    await async_client.post("/api/v1/ritm/RITM0000020/policy", json=[policy])
+
+    response = await async_client.get("/api/v1/ritm/RITM0000020")
+    assert "testuser" in response.json()["ritm"]["editors"]
+
+
+@pytest.mark.asyncio
+async def test_save_policy_without_editor_lock_does_not_add_duplicate(async_client: AsyncClient):
+    """Saving a policy without the editor lock does not re-add already-present user."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000021"})
+    # Do NOT acquire editor lock - testuser is already in editors from create
+    policy = {
+        "ritm_number": "RITM0000021",
+        "comments": "test",
+        "rule_name": "RITM0000021",
+        "domain_uid": "d1",
+        "domain_name": "Domain1",
+        "package_uid": "p1",
+        "package_name": "Package1",
+        "section_uid": None,
+        "section_name": None,
+        "position_type": "bottom",
+        "action": "accept",
+        "track": "log",
+        "source_ips": ["10.0.0.1"],
+        "dest_ips": ["10.0.0.2"],
+        "services": ["https"],
+    }
+    await async_client.post("/api/v1/ritm/RITM0000021/policy", json=[policy])
+    # editors should still be exactly ["testuser"] (from create, not re-added from save)
+    response = await async_client.get("/api/v1/ritm/RITM0000021")
+    assert response.json()["ritm"]["editors"] == ["testuser"]
+
+
+@pytest.mark.asyncio
+async def test_submit_requires_editor_lock(async_client: AsyncClient):
+    """Editor must hold lock to submit for approval."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000030"})
+    # testuser is an editor (from create) but does NOT hold lock
+    response = await async_client.put(
+        "/api/v1/ritm/RITM0000030",
+        json={"status": 1},  # READY_FOR_APPROVAL
+    )
+    assert response.status_code == 400
+    assert "editor lock" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_submit_with_lock_succeeds(async_client: AsyncClient):
+    """Editor holding lock can submit for approval."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000031"})
+    await async_client.post("/api/v1/ritm/RITM0000031/editor-lock")
+    response = await async_client.put(
+        "/api/v1/ritm/RITM0000031",
+        json={"status": 1},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == 1
+
+
+@pytest.mark.asyncio
+async def test_editor_cannot_approve(async_client: AsyncClient):
+    """Any editor is blocked from approving, not just the creator."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000032"})
+    await async_client.post("/api/v1/ritm/RITM0000032/editor-lock")
+    await async_client.put("/api/v1/ritm/RITM0000032", json={"status": 1})
+    response = await async_client.put(
+        "/api/v1/ritm/RITM0000032",
+        json={"status": 2},  # APPROVED
+    )
+    assert response.status_code == 400
+    assert "cannot approve" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_reject_adds_reviewer_and_clears_editor_lock(async_client: AsyncClient):
+    """Rejection inserts reviewer record and clears editor lock."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000033"})
+    await async_client.post("/api/v1/ritm/RITM0000033/editor-lock")
+    await async_client.put("/api/v1/ritm/RITM0000033", json={"status": 1})
+
+    # Reject — in real workflow a different user would do this, but the rule is:
+    # if you're in editors you can't approve but CAN reject (because reviewer != editor).
+    # For this test testuser is the creator/editor and is also "rejecting" to verify
+    # the reviewer row is inserted and the editor lock is cleared.
+    response = await async_client.put(
+        "/api/v1/ritm/RITM0000033",
+        json={"status": 0, "feedback": "Please fix the source IP"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == 0
+    assert data["editor_locked_by"] is None
+    # testuser appears in reviewers
+    assert any(r["username"] == "testuser" for r in data["reviewers"])
+    assert any(r["action"] == "rejected" for r in data["reviewers"])
+
+
+@pytest.mark.asyncio
+async def test_next_attempt_returns_1_when_no_evidence(async_client: AsyncClient):
+    """_next_attempt returns 1 when no evidence sessions exist."""
+    import fa.routes.ritm as ritm_module
+    import fa.services.ritm_workflow_service as svc_module
+    from fa.services.ritm_workflow_service import RITMWorkflowService
+
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000040"})
+    svc_module.engine = ritm_module.engine
+
+    service = RITMWorkflowService(client=None, ritm_number="RITM0000040", username="testuser")
+    attempt = await service._next_attempt()
+    assert attempt == 1
+
+
+@pytest.mark.asyncio
+async def test_next_attempt_increments(async_client: AsyncClient):
+    """_next_attempt returns max+1 when evidence sessions exist."""
+    from datetime import UTC, datetime
+    from sqlalchemy.ext.asyncio import AsyncSession
+    import fa.routes.ritm as ritm_module
+    import fa.services.ritm_workflow_service as svc_module
+    from fa.models import RITMEvidenceSession
+    from fa.services.ritm_workflow_service import RITMWorkflowService
+
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000041"})
+    svc_module.engine = ritm_module.engine
+
+    async with AsyncSession(ritm_module.engine) as db:
+        db.add(RITMEvidenceSession(
+            ritm_number="RITM0000041",
+            attempt=1,
+            domain_name="D1",
+            domain_uid="uid1",
+            package_name="P1",
+            package_uid="puid1",
+            session_type="initial",
+            created_at=datetime.now(UTC),
+        ))
+        await db.commit()
+
+    service = RITMWorkflowService(client=None, ritm_number="RITM0000041", username="testuser")
+    attempt = await service._next_attempt()
+    assert attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_publish_requires_approved_status(async_client: AsyncClient):
+    """Publish endpoint returns 400 when RITM is not APPROVED."""
+    await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000050"})
+    response = await async_client.post("/api/v1/ritm/RITM0000050/publish")
+    assert response.status_code == 400
+    assert "approved" in response.json()["detail"].lower()

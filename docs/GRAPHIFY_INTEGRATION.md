@@ -15,6 +15,7 @@ graphify claude install
 ```
 
 This adds a `## graphify` section to `CLAUDE.md` that instructs Claude to:
+
 - Check the graph before answering codebase questions
 - Rebuild the graph after code changes
 - Use graph context for better answers
@@ -38,6 +39,7 @@ Export the graph as markdown/wiki that Copilot can read:
 ```
 
 This creates:
+
 - `graphify-out/wiki/` - Markdown documentation
 - `graphify-out/obsidian/` - Obsidian vault with all nodes
 
@@ -84,6 +86,7 @@ graphify hook install
 ```
 
 After every `git commit`, the hook:
+
 - Detects changed code files
 - Re-runs AST extraction (fast, no LLM needed)
 - Updates `graph.json` and `GRAPH_REPORT.md`

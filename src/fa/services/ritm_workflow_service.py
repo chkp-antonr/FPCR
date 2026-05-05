@@ -7,16 +7,16 @@ from typing import Any
 
 from cpaiops import CPAIOPSClient
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func
 from sqlmodel import col, select
 
 from ..db import engine
 from ..models import (
-    RITM,
     CachedSection,
     EvidenceData,
     PackageResult,
     Policy,
-    RITMSession,
+    RITMEvidenceSession,
     TryVerifyResponse,
 )
 from ..services.session_changes_pdf import SessionChangesPDFGenerator
@@ -37,17 +37,12 @@ class RITMWorkflowService:
         self.client = client
         self.ritm_number = ritm_number
         self.username = username
-        self.mgmt_name = client.get_mgmt_names()[0]
+        self.mgmt_name = client.get_mgmt_names()[0] if client is not None else ""
         self.logger = logging.getLogger(__name__)
         self.pdf_generator = SessionChangesPDFGenerator()
 
     async def try_verify(self) -> TryVerifyResponse:
-        """Execute full Try & Verify workflow.
-
-        Returns:
-            TryVerifyResponse with per-package results, evidence, and publish status.
-        """
-        # Group policies by package
+        """Execute full Try & Verify workflow."""
         packages = await self._group_by_package()
         if not packages:
             self.logger.warning(f"No packages found for RITM {self.ritm_number}")
@@ -58,10 +53,15 @@ class RITMWorkflowService:
                 published=False,
                 session_changes=None,
             )
+
         self.logger.info(
             f"Try & Verify for RITM {self.ritm_number}: "
             f"Processing {len(packages)} unique package(s)"
         )
+
+        # Compute attempt number ONCE – shared across all packages in this run
+        attempt = await self._next_attempt()
+        session_type = "initial" if attempt == 1 else "correction"
 
         results: list[PackageResult] = []
         all_evidence: list[EvidenceData] = []
@@ -71,7 +71,6 @@ class RITMWorkflowService:
             self.logger.info(
                 f"Processing package: {pkg_info.package_name} (domain: {pkg_info.domain_name})"
             )
-
             pkg_workflow = PackageWorkflowService(
                 client=self.client,
                 package_info=pkg_info,
@@ -79,19 +78,13 @@ class RITMWorkflowService:
                 mgmt_name=self.mgmt_name,
             )
 
-            # Step 1: Verify FIRST (pre-check)
             verify1 = await pkg_workflow.verify_first()
             if not verify1.success:
                 results.append(
-                    PackageResult(
-                        package=pkg_info.package_name,
-                        status="skipped",
-                        errors=verify1.errors,
-                    )
+                    PackageResult(package=pkg_info.package_name, status="skipped", errors=verify1.errors)
                 )
                 continue
 
-            # Step 2: Create objects and rules
             create_result = await pkg_workflow.create_objects_and_rules()
             if create_result.errors:
                 results.append(
@@ -105,10 +98,8 @@ class RITMWorkflowService:
                 )
                 continue
 
-            # Step 3: Verify AGAIN (post-creation)
             verify2 = await pkg_workflow.verify_again()
             if not verify2.success:
-                # Rollback rules
                 await pkg_workflow.rollback_rules(create_result.created_rule_uids)
                 results.append(
                     PackageResult(
@@ -121,12 +112,10 @@ class RITMWorkflowService:
                 )
                 continue
 
-            # Step 4: Success path
-            # Capture evidence for this package
             evidence = await pkg_workflow.capture_evidence()
             all_evidence.append(evidence)
 
-            # Disable newly created rules
+            await self._store_evidence_session(evidence, attempt, session_type)
             await pkg_workflow.disable_rules(create_result.created_rule_uids)
 
             results.append(
@@ -139,40 +128,60 @@ class RITMWorkflowService:
             )
             any_success = True
 
-        # After all packages: combine evidence and publish
         combined_session_changes = self._combine_evidence(all_evidence)
-
-        # Build UID-to-name mapping for section resolution in evidence
         section_uid_to_name = await self._build_section_uid_mapping()
-
         evidence_pdf, evidence_html = self._generate_evidence_artifacts(
             combined_session_changes, section_uid_to_name
         )
 
-        # Base64 encode PDF bytes for JSON serialization
         import base64
-
         evidence_pdf_b64 = base64.b64encode(evidence_pdf).decode("utf-8") if evidence_pdf else None
 
-        # Store session UIDs and get the primary session UID
-        session_uid = await self._store_session_uids(all_evidence)
-
-        # Store evidence in RITM with session UID
-        await self._store_evidence(combined_session_changes, session_uid)
-
-        # Publish if any packages succeeded
-        published = False
         if any_success:
             await self._publish_session()
-            published = True
 
         return TryVerifyResponse(
             results=results,
             evidence_pdf=evidence_pdf_b64,
             evidence_html=evidence_html,
-            published=published,
+            published=any_success,
             session_changes=combined_session_changes,
         )
+
+    async def _next_attempt(self) -> int:
+        """Compute next attempt number – MAX(attempt)+1 for this RITM, or 1 if none."""
+        async with AsyncSession(engine) as db:
+            result = await db.execute(
+                select(func.max(RITMEvidenceSession.attempt)).where(
+                    col(RITMEvidenceSession.ritm_number) == self.ritm_number
+                )
+            )
+            max_val = result.scalar_one_or_none()
+            return (max_val or 0) + 1
+
+    async def _store_evidence_session(
+        self, evidence: EvidenceData, attempt: int, session_type: str
+    ) -> None:
+        """Persist one package's evidence as a row in ritm_evidence_sessions."""
+        async with AsyncSession(engine) as db:
+            db.add(
+                RITMEvidenceSession(
+                    ritm_number=self.ritm_number,
+                    attempt=attempt,
+                    domain_name=evidence.domain_name,
+                    domain_uid=evidence.domain_uid,
+                    package_name=evidence.package_name,
+                    package_uid=evidence.package_uid,
+                    session_uid=evidence.session_uid,
+                    sid=evidence.sid,
+                    session_type=session_type,
+                    session_changes=json.dumps(evidence.session_changes)
+                    if evidence.session_changes
+                    else None,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
 
     async def _group_by_package(self) -> list[PackageInfo]:
         """Group policies by unique domain/package combinations."""
@@ -269,61 +278,6 @@ class RITMWorkflowService:
         except Exception as e:
             self.logger.error(f"Failed to generate evidence: {e}", exc_info=True)
             return None, None
-
-    async def _store_session_uids(self, evidence_list: list[EvidenceData]) -> str | None:
-        """Store session UIDs in RITMSession table for evidence re-creation.
-
-        Returns:
-            The first session UID found (for storing in RITM record).
-        """
-        first_session_uid: str | None = None
-        async with AsyncSession(engine) as db:
-            try:
-                # Delete old sessions for this RITM to avoid accumulation
-                from sqlalchemy import delete
-
-                await db.execute(
-                    delete(RITMSession).where(col(RITMSession.ritm_number) == self.ritm_number)
-                )
-
-                # Add new sessions
-                for evidence in evidence_list:
-                    if evidence.session_uid:
-                        if first_session_uid is None:
-                            first_session_uid = evidence.session_uid
-                        db.add(
-                            RITMSession(
-                                ritm_number=self.ritm_number,
-                                domain_name=evidence.domain_name,
-                                domain_uid=evidence.domain_uid,
-                                session_uid=evidence.session_uid,
-                                sid=evidence.sid or "",
-                                created_at=datetime.now(UTC),
-                            )
-                        )
-                await db.commit()
-            except Exception as e:
-                self.logger.error(f"Failed to store session UIDs: {e}", exc_info=True)
-        return first_session_uid
-
-    async def _store_evidence(
-        self, session_changes: dict[str, Any], session_uid: str | None = None
-    ) -> None:
-        """Store combined session_changes in RITM record."""
-        async with AsyncSession(engine) as db:
-            try:
-                ritm_result = await db.execute(
-                    select(RITM).where(col(RITM.ritm_number) == self.ritm_number)
-                )
-                ritm = ritm_result.scalar_one_or_none()
-                if ritm:
-                    ritm.session_changes_evidence1 = json.dumps(session_changes)
-                    ritm.try_verify_session_uid = session_uid
-                    await db.commit()
-                else:
-                    self.logger.warning(f"RITM {self.ritm_number} not found for evidence storage")
-            except Exception as e:
-                self.logger.error(f"Failed to store evidence: {e}", exc_info=True)
 
     async def _publish_session(self) -> None:
         """Publish changes with session name format: {ritm_number} {username} Created."""

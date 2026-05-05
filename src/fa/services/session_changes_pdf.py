@@ -565,7 +565,9 @@ class SessionChangesPDFGenerator:
         if section_uid_to_name is None:
             section_uid_to_name = {}
 
-        logger.debug(f"Parsing session changes with {len(section_uid_to_name)} UID-to-name mappings")
+        logger.debug(
+            f"Parsing session changes with {len(section_uid_to_name)} UID-to-name mappings"
+        )
         domains: list[dict[str, Any]] = []
 
         domain_changes = session_changes.get("domain_changes", {})
@@ -687,7 +689,9 @@ class SessionChangesPDFGenerator:
                                     continue
                                 return candidate
 
-                            logger.debug(f"Section name not found for rule {obj.get('name', 'unknown')}, using fallback 'Rules'")
+                            logger.debug(
+                                f"Section name not found for rule {obj.get('name', 'unknown')}, using fallback 'Rules'"
+                            )
                             return "Rules"
 
                         # Helper function to process objects

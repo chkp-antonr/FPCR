@@ -125,11 +125,11 @@ export default function RitmApprove() {
   useEffect(() => {
     const checkSessionChangesAvailable = async () => {
       if (!ritmNumber) return;
-
-      // Session changes PDF is available after apply completes (evidence #1 is stored)
-      if (ritm && ritm.session_changes_evidence1) {
-        setSessionChangesAvailable(true);
-      } else {
+      try {
+        const history = await ritmApi.getEvidenceHistory(ritmNumber);
+        setSessionChangesAvailable(history.domains && history.domains.length > 0);
+      } catch (err) {
+        console.error('getEvidenceHistory failed:', err);
         setSessionChangesAvailable(false);
       }
     };
@@ -142,14 +142,17 @@ export default function RitmApprove() {
 
     try {
       setActionLoading(true);
-      await ritmApi.update(ritmNumber, {
-        status: RITM_STATUS.APPROVED,
-      });
-      message.success('RITM approved successfully');
+      await ritmApi.update(ritmNumber, { status: RITM_STATUS.APPROVED });
+      const publishResponse = await ritmApi.publish(ritmNumber);
+      if (publishResponse.errors && publishResponse.errors.length > 0) {
+        message.warning(`Published with errors: ${publishResponse.errors.join(', ')}`);
+      } else {
+        message.success('RITM approved and published to Check Point');
+      }
       setApproveModalVisible(false);
       navigate('/');
     } catch (error: any) {
-      message.error(error.response?.data?.detail || 'Failed to approve RITM');
+      message.error(error.response?.data?.detail || 'Failed to approve/publish RITM');
     } finally {
       setActionLoading(false);
     }
@@ -177,40 +180,6 @@ export default function RitmApprove() {
       message.error(error.response?.data?.detail || 'Failed to return RITM');
     } finally {
       setActionLoading(false);
-    }
-  };
-
-  const handlePublish = async () => {
-    if (!ritmNumber) return;
-
-    try {
-      setActionLoading(true);
-      const response = await ritmApi.publish(ritmNumber);
-      if (response.success) {
-        message.success(`RITM published successfully: ${response.message}`);
-        if (response.errors && response.errors.length > 0) {
-          message.warning(`Some rules had errors: ${response.errors.join(', ')}`);
-        }
-        navigate('/');
-      } else {
-        message.error(`Failed to publish: ${response.message}`);
-      }
-    } catch (error: any) {
-      message.error(error.response?.data?.detail || 'Failed to publish RITM');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleReleaseLock = async () => {
-    if (!ritmNumber) return;
-
-    try {
-      await ritmApi.releaseLock(ritmNumber);
-      message.success('Lock released');
-      navigate('/');
-    } catch (error: any) {
-      message.error(error.response?.data?.detail || 'Failed to release lock');
     }
   };
 
@@ -286,8 +255,8 @@ export default function RitmApprove() {
   const currentUsername = user?.username || '';
   const isCreator = ritm.username_created === currentUsername;
 
-  // Creator cannot approve their own RITM
-  if (isCreator) {
+  // Creator cannot approve their own RITM (but can view completed ones)
+  if (isCreator && ritm.status === RITM_STATUS.READY_FOR_APPROVAL) {
     return (
       <div style={{ padding: 24 }}>
         <Alert
@@ -321,9 +290,6 @@ export default function RitmApprove() {
     comments: policy.comments,
     rule_name: policy.rule_name,
   }));
-
-  const isApproved = ritm.status === RITM_STATUS.APPROVED;
-  const isCompleted = ritm.status === RITM_STATUS.COMPLETED;
 
   return (
     <div className={styles.pageContainer}>
@@ -409,82 +375,66 @@ export default function RitmApprove() {
         />
       </Card>
 
-      {sessionChangesAvailable && (
-        <Card title="Session Changes" style={{ marginBottom: 16 }}>
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Space>
-              <Button
-                type="primary"
-                onClick={handleDownloadSessionPdf}
-              >
-                Download Evidence PDF
-              </Button>
-              <Button
-                onClick={handleToggleSessionHtml}
-                loading={htmlLoading}
-              >
-                {showSessionHtml ? 'Hide Evidence HTML' : 'Show Evidence HTML'}
-              </Button>
-            </Space>
-
-            {showSessionHtml && sessionHtml && (
-              <iframe
-                title="Evidence HTML Preview"
-                srcDoc={sessionHtml}
-                sandbox="allow-same-origin"
-                style={{
-                  width: '100%',
-                  minHeight: 650,
-                  border: '1px solid #d9d9d9',
-                  borderRadius: 8,
-                  backgroundColor: '#fff',
-                }}
-              />
-            )}
-          </Space>
-        </Card>
-      )}
-
-      <Card>
+      <Card title="Evidence" style={{ marginBottom: 16 }}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          {lockInfo.canEdit && !isApproved && !isCompleted && (
-            <Space>
-              <Button
-                type="primary"
-                icon={<CheckOutlined />}
-                onClick={() => setApproveModalVisible(true)}
-                loading={actionLoading}
-              >
-                Approve
-              </Button>
-              <Button
-                danger
-                icon={<CloseOutlined />}
-                onClick={() => setReturnModalVisible(true)}
-                loading={actionLoading}
-              >
-                Reject with Feedback
-              </Button>
-            </Space>
-          )}
-
-          {isApproved && !isCompleted && (
+          <Space>
             <Button
               type="primary"
-              onClick={handlePublish}
-              loading={actionLoading}
+              onClick={handleDownloadSessionPdf}
             >
-              Publish to Check Point
+              Download Evidence PDF
             </Button>
+            <Button
+              onClick={handleToggleSessionHtml}
+              loading={htmlLoading}
+            >
+              {showSessionHtml ? 'Hide Evidence HTML' : 'Show Evidence HTML'}
+            </Button>
+          </Space>
+
+          {!sessionChangesAvailable && (
+            <Text type="secondary">No evidence sessions found for this RITM.</Text>
           )}
 
-          {lockInfo.canEdit && !isCompleted && (
-            <Button onClick={handleReleaseLock}>
-              Release Lock
-            </Button>
+          {showSessionHtml && sessionHtml && (
+            <iframe
+              title="Evidence HTML Preview"
+              srcDoc={sessionHtml}
+              sandbox="allow-same-origin"
+              style={{
+                width: '100%',
+                minHeight: 650,
+                border: '1px solid #d9d9d9',
+                borderRadius: 8,
+                backgroundColor: '#fff',
+              }}
+            />
           )}
         </Space>
       </Card>
+
+      {lockInfo.canEdit && ritm.status === RITM_STATUS.READY_FOR_APPROVAL && (
+        <Card>
+          <Space>
+            <Button
+              type="primary"
+              icon={<CheckOutlined />}
+              onClick={() => setApproveModalVisible(true)}
+              loading={actionLoading}
+            >
+              Approve
+            </Button>
+            <Button
+              danger
+              icon={<CloseOutlined />}
+              onClick={() => setReturnModalVisible(true)}
+              loading={actionLoading}
+            >
+              Reject with Feedback
+            </Button>
+          </Space>
+        </Card>
+      )}
 
       <Modal
         title="Approve RITM"
@@ -496,7 +446,7 @@ export default function RitmApprove() {
         confirmLoading={actionLoading}
       >
         <p>Are you sure you want to approve this RITM?</p>
-        <p>Once approved, it will be ready to publish to Check Point.</p>
+        <p>This will enable the rules, run a final policy verification, and publish to Check Point.</p>
       </Modal>
 
       <Modal

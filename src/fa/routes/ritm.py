@@ -140,6 +140,8 @@ async def create_ritm(
             username_created=session.username,
             date_created=datetime.now(UTC),
             status=RITMStatus.WORK_IN_PROGRESS,
+            editor_locked_by=session.username,
+            editor_locked_at=datetime.now(UTC),
         )
         db.add(ritm)
         db.add(

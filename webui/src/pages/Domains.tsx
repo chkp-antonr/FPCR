@@ -545,9 +545,9 @@ const Domains: React.FC = () => {
           }}
         >
           <div style={{ marginBottom: 8, fontWeight: 600 }}>
-            Refreshing domains and policy packages
+            Refreshing domains
           </div>
-          {cacheStatus.domains_progress.total === 0 && cacheStatus.packages_progress.total === 0 && (
+          {cacheStatus.domains_progress.total === 0 && (
             <div
               style={{
                 display: 'inline-block',
@@ -570,17 +570,6 @@ const Domains: React.FC = () => {
             percent={getProgressPercent(
               cacheStatus.domains_progress.processed,
               cacheStatus.domains_progress.total
-            )}
-            status="active"
-            style={{ marginBottom: 16 }}
-          />
-          <div style={{ marginBottom: 16, color: '#666' }}>
-            Packages: {cacheStatus.packages_progress.processed} / {cacheStatus.packages_progress.total}
-          </div>
-          <Progress
-            percent={getProgressPercent(
-              cacheStatus.packages_progress.processed,
-              cacheStatus.packages_progress.total
             )}
             status="active"
           />

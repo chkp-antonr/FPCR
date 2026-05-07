@@ -594,6 +594,7 @@ class VerifyResponse(BaseModel):
 class PackageResult(BaseModel):
     """Result of Try & Verify for a single package."""
 
+    domain: str = ""
     package: str
     status: Literal["success", "skipped", "create_failed", "verify_failed"]
     rules_created: int = 0

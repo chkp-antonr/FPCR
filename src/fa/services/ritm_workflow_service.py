@@ -16,6 +16,7 @@ from ..models import (
     EvidenceData,
     PackageResult,
     Policy,
+    RITMCreatedRule,
     RITMEvidenceSession,
     TryVerifyResponse,
 )
@@ -81,7 +82,7 @@ class RITMWorkflowService:
             verify1 = await pkg_workflow.verify_first()
             if not verify1.success:
                 results.append(
-                    PackageResult(package=pkg_info.package_name, status="skipped", errors=verify1.errors)
+                    PackageResult(domain=pkg_info.domain_name, package=pkg_info.package_name, status="skipped", errors=verify1.errors)
                 )
                 continue
 
@@ -89,6 +90,7 @@ class RITMWorkflowService:
             if create_result.errors:
                 results.append(
                     PackageResult(
+                        domain=pkg_info.domain_name,
                         package=pkg_info.package_name,
                         status="create_failed",
                         objects_created=create_result.objects_created,
@@ -103,6 +105,7 @@ class RITMWorkflowService:
                 await pkg_workflow.rollback_rules(create_result.created_rule_uids)
                 results.append(
                     PackageResult(
+                        domain=pkg_info.domain_name,
                         package=pkg_info.package_name,
                         status="verify_failed",
                         objects_created=create_result.objects_created,
@@ -116,10 +119,15 @@ class RITMWorkflowService:
             all_evidence.append(evidence)
 
             await self._store_evidence_session(evidence, attempt, session_type)
-            await pkg_workflow.disable_rules(create_result.created_rule_uids)
+            await self._store_created_rules(
+                create_result.created_rule_uids,
+                pkg_info.domain_uid,
+                pkg_info.package_uid,
+            )
 
             results.append(
                 PackageResult(
+                    domain=pkg_info.domain_name,
                     package=pkg_info.package_name,
                     status="success",
                     objects_created=create_result.objects_created,
@@ -136,9 +144,6 @@ class RITMWorkflowService:
 
         import base64
         evidence_pdf_b64 = base64.b64encode(evidence_pdf).decode("utf-8") if evidence_pdf else None
-
-        if any_success:
-            await self._publish_session()
 
         return TryVerifyResponse(
             results=results,
@@ -308,6 +313,27 @@ class RITMWorkflowService:
                     f"Publish to domain '{domain_name}' error: {e}",
                     exc_info=True,
                 )
+
+    async def _store_created_rules(
+        self, rule_uids: list[str], domain_uid: str, package_uid: str
+    ) -> None:
+        """Persist created rule UIDs to ritm_created_rules for use during approval."""
+        if not rule_uids:
+            return
+        async with AsyncSession(engine) as db:
+            for uid in rule_uids:
+                db.add(
+                    RITMCreatedRule(
+                        ritm_number=self.ritm_number,
+                        rule_uid=uid,
+                        package_uid=package_uid,
+                        domain_uid=domain_uid,
+                        verification_status="verified",
+                        disabled=False,
+                        created_at=datetime.now(UTC),
+                    )
+                )
+            await db.commit()
 
     async def _build_section_uid_mapping(self) -> dict[str, str]:
         """Build mapping of section/layer UIDs to human-readable names.

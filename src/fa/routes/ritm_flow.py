@@ -90,6 +90,59 @@ def get_pdf_generator() -> SessionChangesPDFGenerator:
     return _pdf_generator
 
 
+_ATTEMPT_TYPE_LABELS: dict[str, str] = {
+    "initial": "Initial",
+    "correction": "Correction",
+    "approval": "Approval",
+}
+
+
+def _group_rows_by_attempt(rows: Sequence[RITMEvidenceSession]) -> list[dict[str, Any]]:
+    """Group evidence session rows by attempt number into attempt_data dicts."""
+    bucket: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        if row.attempt not in bucket:
+            bucket[row.attempt] = {
+                "attempt_num": row.attempt,
+                "session_type": row.session_type,
+                "session_changes": {"domain_changes": {}, "apply_session_trace": [], "errors": []},
+            }
+        att = bucket[row.attempt]
+        sc: dict[str, Any] = {}
+        if row.session_changes:
+            try:
+                sc = json.loads(row.session_changes)
+            except Exception:
+                pass
+        dc = att["session_changes"]["domain_changes"]
+        if row.domain_name not in dc:
+            dc[row.domain_name] = {}
+        dc[row.domain_name].update(sc)
+        if row.session_uid:
+            att["session_changes"]["apply_session_trace"].append(
+                {
+                    "domain": row.domain_name,
+                    "attempt": row.attempt,
+                    "session_uid": row.session_uid,
+                    "created_at": row.created_at.isoformat() if row.created_at else "",
+                }
+            )
+
+    result: list[dict[str, Any]] = []
+    for attempt_num in sorted(bucket.keys()):
+        att = bucket[attempt_num]
+        stype = att["session_type"]
+        label = _ATTEMPT_TYPE_LABELS.get(stype, stype.capitalize())
+        result.append(
+            {
+                "attempt_num": attempt_num,
+                "label": label,
+                "session_changes": att["session_changes"],
+            }
+        )
+    return result
+
+
 def _as_list(raw: object) -> list[str]:
     """Decode a DB field that may be a list or a JSON-encoded string."""
     if isinstance(raw, list):
@@ -351,6 +404,116 @@ async def try_verify_ritm(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@router.post("/ritm/{ritm_number}/submit-for-approval")
+async def submit_for_approval(
+    ritm_number: str,
+    session: SessionData = Depends(get_session_data),
+) -> PublishResponse:
+    """Disable enabled rules, publish session, then mark RITM as Ready for Approval.
+
+    1. Disable rules from ritm_created_rules (they were created enabled during Try & Verify)
+    2. Publish — commits disabled rules to Check Point
+    3. Update RITM status to READY_FOR_APPROVAL
+    """
+    async with AsyncSession(engine) as db:
+        ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        ritm = ritm_result.scalar_one_or_none()
+        if not ritm:
+            raise HTTPException(status_code=404, detail="RITM not found")
+        if ritm.editor_locked_by != session.username:
+            raise HTTPException(status_code=400, detail="You must hold the editor lock to submit for approval")
+
+        policies_result = await db.execute(
+            select(Policy).where(col(Policy.ritm_number) == ritm_number)
+        )
+        policies = list(policies_result.scalars().all())
+
+        rules_result = await db.execute(
+            select(RITMCreatedRule).where(col(RITMCreatedRule.ritm_number) == ritm_number)
+        )
+        created_rules = list(rules_result.scalars().all())
+
+    # Build per-package metadata from policies
+    pkg_meta: dict[tuple[str, str], tuple[str, str]] = {}
+    for policy in policies:
+        pkg_meta[(policy.domain_uid, policy.package_uid)] = (policy.domain_name, policy.package_name)
+
+    rules_by_pkg: dict[tuple[str, str], list[RITMCreatedRule]] = {}
+    for rule in created_rules:
+        rules_by_pkg.setdefault((rule.domain_uid, rule.package_uid), []).append(rule)
+
+    errors: list[str] = []
+    success_count = 0
+
+    try:
+        async with CPAIOPSClient(
+            engine=engine,
+            username=session.username,
+            password=session.password,
+            mgmt_ip=settings.api_mgmt,
+        ) as client:
+            mgmt_name = client.get_mgmt_names()[0]
+
+            for (domain_uid, package_uid), (domain_name, _package_name) in pkg_meta.items():
+                pkg_rules = rules_by_pkg.get((domain_uid, package_uid), [])
+
+                # Disable all rules created during Try & Verify
+                for rule in pkg_rules:
+                    result = await client.api_call(
+                        mgmt_name=mgmt_name,
+                        domain=domain_name,
+                        command="set-access-rule",
+                        payload={"uid": rule.rule_uid, "enabled": False},
+                    )
+                    if not result.success:
+                        errors.append(
+                            f"Failed to disable rule {rule.rule_uid} in {domain_name}: "
+                            f"{result.message or result.code}"
+                        )
+
+                # Publish with disabled rules
+                pub_result = await client.api_call(
+                    mgmt_name=mgmt_name,
+                    domain=domain_name,
+                    command="publish",
+                    payload={},
+                )
+                if pub_result.success:
+                    success_count += 1
+                else:
+                    errors.append(
+                        f"Publish failed for {domain_name}: {pub_result.message or pub_result.code}"
+                    )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in submit_for_approval for RITM {ritm_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    if errors and success_count == 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Submit failed: {'; '.join(errors)}",
+        )
+
+    # Update RITM status to READY_FOR_APPROVAL
+    async with AsyncSession(engine) as db:
+        ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        ritm = ritm_result.scalar_one()
+        ritm.status = RITMStatus.READY_FOR_APPROVAL
+        ritm.date_updated = datetime.now(UTC)
+        await db.commit()
+
+    return PublishResponse(
+        success=True,
+        message=f"Rules disabled and published for RITM {ritm_number}. Ready for approval.",
+        created=success_count,
+        errors=errors,
+    )
+
+
+
 @router.post("/ritm/{ritm_number}/publish")
 async def publish_ritm(
     ritm_number: str,
@@ -362,7 +525,7 @@ async def publish_ritm(
     1. Enable disabled rules from ritm_created_rules
     2. Verify policy – on failure re-disable rules, continue
     3. Capture show-changes (approval evidence)
-    4. Publish with session name '{RITM} {username} Published'
+    4. Publish with rules enabled
 
     On all packages succeeding: status → COMPLETED
     """
@@ -1263,40 +1426,14 @@ async def get_session_pdf(
     if not rows:
         raise HTTPException(status_code=400, detail="No evidence sessions found for this RITM")
 
-    combined: dict[str, Any] = {
-        "apply_session_trace": [],
-        "domain_changes": {},
-        "errors": [],
-    }
-    for row in rows:
-        sc: dict[str, Any] = {}
-        if row.session_changes:
-            try:
-                sc = json.loads(row.session_changes)
-            except Exception:
-                pass
-        if row.domain_name not in combined["domain_changes"]:
-            combined["domain_changes"][row.domain_name] = {}
-        combined["domain_changes"][row.domain_name].update(sc)
-        if row.session_uid:
-            combined["apply_session_trace"].append(
-                {
-                    "domain": row.domain_name,
-                    "attempt": row.attempt,
-                    "session_uid": row.session_uid,
-                    "created_at": row.created_at.isoformat() if row.created_at else "",
-                }
-            )
+    attempt_data = _group_rows_by_attempt(rows)
 
     try:
         pdf_generator = get_pdf_generator()
-        section_uid_to_name: dict[str, str] = {}
-        pdf_bytes = pdf_generator.generate_pdf(
+        pdf_bytes = pdf_generator.generate_pdf_multi_attempt(
             ritm_number=ritm_number,
-            evidence_number=1,
             username=session.username,
-            session_changes=combined,
-            section_uid_to_name=section_uid_to_name,
+            attempt_data=attempt_data,
         )
         return Response(
             content=pdf_bytes,
@@ -1337,41 +1474,14 @@ async def get_session_html(
     if not rows:
         raise HTTPException(status_code=400, detail="No evidence sessions found for this RITM")
 
-    # Build combined session_changes for the evidence renderer
-    combined: dict[str, Any] = {
-        "apply_session_trace": [],
-        "domain_changes": {},
-        "errors": [],
-    }
-    for row in rows:
-        sc: dict[str, Any] = {}
-        if row.session_changes:
-            try:
-                sc = json.loads(row.session_changes)
-            except Exception:
-                pass
-        if row.domain_name not in combined["domain_changes"]:
-            combined["domain_changes"][row.domain_name] = {}
-        combined["domain_changes"][row.domain_name].update(sc)
-        if row.session_uid:
-            combined["apply_session_trace"].append(
-                {
-                    "domain": row.domain_name,
-                    "attempt": row.attempt,
-                    "session_uid": row.session_uid,
-                    "created_at": row.created_at.isoformat() if row.created_at else "",
-                }
-            )
+    attempt_data = _group_rows_by_attempt(rows)
 
     try:
         pdf_generator = get_pdf_generator()
-        section_uid_to_name: dict[str, str] = {}
-        html = pdf_generator.generate_html(
+        html = pdf_generator.generate_html_multi_attempt(
             ritm_number=ritm_number,
-            evidence_number=1,
             username=session.username,
-            session_changes=combined,
-            section_uid_to_name=section_uid_to_name,
+            attempt_data=attempt_data,
         )
         return HTMLResponse(content=html)
     except Exception as e:

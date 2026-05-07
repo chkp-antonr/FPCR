@@ -248,6 +248,8 @@ export interface RITMItem {
   status: number;
   approver_locked_by: string | null;
   approver_locked_at: string | null;
+  editor_locked_by: string | null;
+  editor_locked_at: string | null;
   // Input pools
   source_ips?: string[];
   dest_ips?: string[];
@@ -334,6 +336,7 @@ export const RITM_STATUS: RITMStatus = {
 };
 
 export interface PackageResult {
+  domain: string;
   package: string;
   status: "success" | "skipped" | "create_failed" | "verify_failed";
   rules_created: number;

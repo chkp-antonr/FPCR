@@ -153,6 +153,11 @@ export const ritmApi = {
     return response.data;
   },
 
+  submitForApproval: async (ritmNumber: string): Promise<PublishResponse> => {
+    const response = await apiClient.post<PublishResponse>(`/api/v1/ritm/${ritmNumber}/submit-for-approval`);
+    return response.data;
+  },
+
   acquireLock: async (ritmNumber: string): Promise<RITMItem> => {
     const response = await apiClient.post<RITMItem>(`/api/v1/ritm/${ritmNumber}/lock`);
     return response.data;
@@ -160,6 +165,11 @@ export const ritmApi = {
 
   releaseLock: async (ritmNumber: string): Promise<RITMItem> => {
     const response = await apiClient.post<RITMItem>(`/api/v1/ritm/${ritmNumber}/unlock`);
+    return response.data;
+  },
+
+  acquireEditorLock: async (ritmNumber: string): Promise<RITMItem> => {
+    const response = await apiClient.post<RITMItem>(`/api/v1/ritm/${ritmNumber}/editor-lock`);
     return response.data;
   },
 
@@ -222,6 +232,11 @@ export const ritmApi = {
         Accept: 'text/html',
       },
     });
+    return response.data;
+  },
+
+  getEvidenceHistory: async (ritmNumber: string): Promise<{ domains: { domain_name: string; packages: any[] }[] }> => {
+    const response = await apiClient.get(`/api/v1/ritm/${ritmNumber}/evidence-history`);
     return response.data;
   },
 };

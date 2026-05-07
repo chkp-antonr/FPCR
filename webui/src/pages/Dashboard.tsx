@@ -57,7 +57,7 @@ export default function Dashboard() {
 
       setMyRitms(allRitms.filter(r =>
         r.username_created === currentUsername &&
-        (r.status === RITM_STATUS.WORK_IN_PROGRESS || r.feedback)
+        r.status === RITM_STATUS.WORK_IN_PROGRESS
       ));
 
       setRitmsForApproval(allRitms.filter(r =>
@@ -66,7 +66,7 @@ export default function Dashboard() {
       ));
 
       setApprovedRitms(allRitms.filter(r =>
-        r.status === RITM_STATUS.APPROVED
+        r.status === RITM_STATUS.COMPLETED
       ));
     } catch (error) {
       message.error('Failed to fetch RITMs');
@@ -172,8 +172,8 @@ export default function Dashboard() {
       return isCreator ? `/ritm/edit/${ritm.ritm_number}` : `/ritm/approve/${ritm.ritm_number}`;
     }
 
-    if (ritm.status === RITM_STATUS.APPROVED) {
-      return isCreator ? `/ritm/edit/${ritm.ritm_number}` : `/ritm/approve/${ritm.ritm_number}`;
+    if (ritm.status === RITM_STATUS.COMPLETED) {
+      return `/ritm/approve/${ritm.ritm_number}`;
     }
 
     return `/ritm/edit/${ritm.ritm_number}`;
@@ -300,17 +300,7 @@ export default function Dashboard() {
                 cacheStatus.domains_progress.total
               )}
               status="active"
-              style={{ marginBottom: 10 }}
-            />
-            <div className={styles.progressLabel}>
-              Packages: {cacheStatus.packages_progress.processed} / {cacheStatus.packages_progress.total}
-            </div>
-            <Progress
-              percent={getProgressPercent(
-                cacheStatus.packages_progress.processed,
-                cacheStatus.packages_progress.total
-              )}
-              status="active"
+              style={{ marginBottom: 0 }}
             />
           </div>
         )}

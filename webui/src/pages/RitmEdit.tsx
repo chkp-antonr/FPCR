@@ -46,6 +46,7 @@ export default function RitmEdit() {
 
   // Modals
   const [submitModalVisible, setSubmitModalVisible] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Workflow state (plan → try & verify)
   type WorkflowStep = 'idle' | 'planned' | 'verified';
@@ -119,20 +120,28 @@ export default function RitmEdit() {
           })));
         }
 
-        // Restore workflow step if evidence exists (page reload recovery)
-        if (response.ritm.session_changes_evidence1) {
+        // Restore workflow step if evidence sessions exist in DB (page reload / 2nd cycle recovery)
+        try {
+          const history = await ritmApi.getEvidenceHistory(ritmNumber || '');
+          if (history.domains && history.domains.length > 0) {
+            setWorkflowStep('verified');
+            setCanRecreateEvidence(true);
+            addWorkflowLog('Workflow restored: Try & Verify was already completed.');
+          }
+        } catch {
+          // no evidence yet — leave workflowStep as 'idle'
+        }
+
+        // Auto-acquire editor lock when opening a WIP RITM (creation or after feedback)
+        if (response.ritm.status === RITM_STATUS.WORK_IN_PROGRESS &&
+            response.ritm.editor_locked_by !== user?.username) {
           try {
-            const evidenceData = JSON.parse(response.ritm.session_changes_evidence1);
-            // Check if we have meaningful evidence (domain_changes or policies exist)
-            const hasEvidence = Object.keys(evidenceData.domain_changes || {}).length > 0 ||
-                               (response.policies && response.policies.length > 0);
-            if (hasEvidence) {
-              setWorkflowStep('verified');
-              setCanRecreateEvidence(true);
-              addWorkflowLog('Workflow restored: Try & Verify was already completed.');
+            await ritmApi.acquireEditorLock(ritmNumber || '');
+          } catch (lockErr: any) {
+            const detail = lockErr.response?.data?.detail;
+            if (detail && detail !== 'RITM not found') {
+              message.warning(`Could not acquire editor lock: ${detail}`);
             }
-          } catch (e) {
-            console.warn('Failed to parse evidence data:', e);
           }
         }
 
@@ -359,14 +368,39 @@ export default function RitmEdit() {
 
     try {
       setSaving(true);
-      await ritmApi.update(ritmNumber || '', {
-        status: RITM_STATUS.READY_FOR_APPROVAL,
-      });
+      setSubmitError(null);
+      const hide = message.loading('Disabling rules and publishing...', 0);
+      try {
+        await ritmApi.submitForApproval(ritmNumber || '');
+      } finally {
+        hide();
+      }
+      message.success('RITM submitted for approval — rules disabled and published');
+      setSubmitModalVisible(false);
+      navigate('/');
+    } catch (error: any) {
+      setSubmitError(error.response?.data?.detail || 'Failed to submit for approval');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleOverrideAndSubmit = async () => {
+    try {
+      setSaving(true);
+      setSubmitError(null);
+      await ritmApi.acquireEditorLock(ritmNumber || '');
+      const hide = message.loading('Disabling rules and publishing...', 0);
+      try {
+        await ritmApi.submitForApproval(ritmNumber || '');
+      } finally {
+        hide();
+      }
       message.success('RITM submitted for approval');
       setSubmitModalVisible(false);
       navigate('/');
     } catch (error: any) {
-      message.error(error.response?.data?.detail || 'Failed to submit for approval');
+      setSubmitError(error.response?.data?.detail || 'Failed to override and submit');
     } finally {
       setSaving(false);
     }
@@ -439,11 +473,11 @@ export default function RitmEdit() {
       // Log per-package results
       response.results.forEach(r => {
         const statusMsg = {
-          success: `✓ ${r.package}: SUCCESS (${r.rules_created} rules, ${r.objects_created} objects)`,
-          skipped: `⊘ ${r.package}: SKIPPED (pre-verify failed)`,
-          create_failed: `✗ ${r.package}: CREATE FAILED`,
-          verify_failed: `✗ ${r.package}: VERIFY FAILED (rules rolled back)`,
-        }[r.status] || `${r.package}: ${r.status}`;
+          success: `✓ ${r.domain} / ${r.package}: SUCCESS (${r.rules_created} rules, ${r.objects_created} objects)`,
+          skipped: `⊘ ${r.domain} / ${r.package}: SKIPPED (pre-verify failed)`,
+          create_failed: `✗ ${r.domain} / ${r.package}: CREATE FAILED`,
+          verify_failed: `✗ ${r.domain} / ${r.package}: VERIFY FAILED (rules rolled back)`,
+        }[r.status] || `${r.domain} / ${r.package}: ${r.status}`;
 
         addWorkflowLog(statusMsg);
 
@@ -734,7 +768,7 @@ export default function RitmEdit() {
     rule_name: rule.rule_name,
   }));
 
-  const canEdit = ritm.status === RITM_STATUS.WORK_IN_PROGRESS || !!ritm.feedback;
+  const canEdit = ritm.status === RITM_STATUS.WORK_IN_PROGRESS;
 
   return (
     <div className={styles.pageContainer}>
@@ -1098,7 +1132,7 @@ export default function RitmEdit() {
                         r.status === 'skipped' ? 'secondary' :
                         'danger'
                       }>
-                        {r.package}: {r.status.toUpperCase()}
+                        {r.domain} / {r.package}: {r.status.toUpperCase()}
                         {r.rules_created > 0 && ` (${r.rules_created} rules, ${r.objects_created} objects)`}
                       </Text>
                       {r.errors.length > 0 && (
@@ -1248,12 +1282,25 @@ export default function RitmEdit() {
         title="Submit for Approval"
         open={submitModalVisible}
         onOk={handleSubmitForApproval}
-        onCancel={() => setSubmitModalVisible(false)}
+        onCancel={() => { setSubmitModalVisible(false); setSubmitError(null); }}
         okText="Submit"
         cancelText="Cancel"
+        confirmLoading={saving}
       >
         <p>Are you sure you want to submit this RITM for approval?</p>
         <p>This will save all rules and allow other users to review and approve them.</p>
+        {submitError && (
+          <Alert
+            type="error"
+            message={submitError}
+            style={{ marginTop: 12 }}
+            action={
+              <Button size="small" danger onClick={handleOverrideAndSubmit} loading={saving}>
+                Override
+              </Button>
+            }
+          />
+        )}
       </Modal>
     </div>
   );

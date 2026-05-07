@@ -1,7 +1,7 @@
 {
   "name": "fpcr",
   "private": true,
-  "version": "0.605.05",
+  "version": "0.605.07",
   "type": "module",
   "scripts": {
     "dev": "vite",

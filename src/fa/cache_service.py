@@ -271,6 +271,9 @@ class CacheService:
                         and existing["last_published_session"] == current_published_session
                     ):
                         logger.info(f"Skipping domain: {domain_name} (no changes)")
+                        # Package progress is reported for the currently processed domain.
+                        self._packages_total = 0
+                        self._packages_processed = 0
                         self._domains_processed += 1
                         continue
 
@@ -287,7 +290,8 @@ class CacheService:
                     # Domain is new or changed - cache it
                     logger.info(f"Caching domain: {domain_name} (uid={domain_uid})")
                     self._current_domain_name = domain_name
-                    self._packages_processed = 0  # Reset packages progress for new domain
+                    self._packages_total = 0
+                    self._packages_processed = 0
 
                     package_result = await client.api_query(
                         mgmt_name,
@@ -329,7 +333,7 @@ class CacheService:
 
                     if package_result.success:
                         packages = package_result.objects or []
-                        self._packages_total += len(packages)
+                        self._packages_total = len(packages)
                         for package_obj in packages:
                             package = CachedPackage(
                                 uid=package_obj.get("uid", ""),

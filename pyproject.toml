@@ -1,6 +1,6 @@
 [project]
 name = "fpcr"
-version = "0.605.05"
+version = "0.605.07"
 description = "Firewall Policy Change Request"
 readme = "README.md"
 requires-python = ">=3.13.5"

@@ -6,22 +6,27 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cpaiops import CPAIOPSClient
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, select
 
 from ..db import engine
 from ..models import (
     CachedSection,
     EvidenceData,
+    GroupedVerifyResponse,
     PackageResult,
+    PackageVerifyResult,
     Policy,
     RITMCreatedRule,
     RITMEvidenceSession,
+    RITMPackageAttempt,
+    RITMPackageAttemptState,
     TryVerifyResponse,
 )
 from ..services.session_changes_pdf import SessionChangesPDFGenerator
 from .package_workflow import PackageInfo, PackageWorkflowService
+from .policy_verifier import PackageVerifyInput, PolicyVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +47,20 @@ class RITMWorkflowService:
         self.logger = logging.getLogger(__name__)
         self.pdf_generator = SessionChangesPDFGenerator()
 
-    async def try_verify(self) -> TryVerifyResponse:
-        """Execute full Try & Verify workflow."""
+    async def try_verify(
+        self,
+        force_continue: bool = False,
+        skip_package_uids: set[str] | None = None,
+    ) -> TryVerifyResponse:
+        """Execute full Try & Verify workflow.
+
+        Args:
+            force_continue: When True, packages that fail pre-check are recorded
+                as PRECHECK_FAILED_SKIPPED and workflow continues for the rest.
+                When False (default), any pre-check failure aborts the whole run.
+            skip_package_uids: Optional explicit set of package UIDs to skip
+                (e.g. pre-populated from a prior /verify-policy call).
+        """
         packages = await self._group_by_package()
         if not packages:
             self.logger.warning(f"No packages found for RITM {self.ritm_number}")
@@ -57,7 +74,8 @@ class RITMWorkflowService:
 
         self.logger.info(
             f"Try & Verify for RITM {self.ritm_number}: "
-            f"Processing {len(packages)} unique package(s)"
+            f"Processing {len(packages)} unique package(s) "
+            f"(force_continue={force_continue})"
         )
 
         # Compute attempt number ONCE – shared across all packages in this run
@@ -72,6 +90,25 @@ class RITMWorkflowService:
             self.logger.info(
                 f"Processing package: {pkg_info.package_name} (domain: {pkg_info.domain_name})"
             )
+
+            # Honour explicit skip list (e.g. from prior /verify-policy results)
+            if skip_package_uids and pkg_info.package_uid in skip_package_uids:
+                await self._record_package_state(
+                    attempt,
+                    pkg_info,
+                    RITMPackageAttemptState.PRECHECK_FAILED_SKIPPED,
+                    "Explicitly skipped via skip_package_uids",
+                )
+                results.append(
+                    PackageResult(
+                        domain=pkg_info.domain_name,
+                        package=pkg_info.package_name,
+                        status="skipped",
+                        errors=["Skipped via explicit skip list"],
+                    )
+                )
+                continue
+
             pkg_workflow = PackageWorkflowService(
                 client=self.client,
                 package_info=pkg_info,
@@ -79,13 +116,43 @@ class RITMWorkflowService:
                 mgmt_name=self.mgmt_name,
             )
 
+            # ── Pre-check ──────────────────────────────────────────────────
             verify1 = await pkg_workflow.verify_first()
             if not verify1.success:
-                results.append(
-                    PackageResult(domain=pkg_info.domain_name, package=pkg_info.package_name, status="skipped", errors=verify1.errors)
+                await self._record_package_state(
+                    attempt,
+                    pkg_info,
+                    RITMPackageAttemptState.PRECHECK_FAILED_SKIPPED,
+                    "; ".join(verify1.errors),
                 )
+                results.append(
+                    PackageResult(
+                        domain=pkg_info.domain_name,
+                        package=pkg_info.package_name,
+                        status="skipped",
+                        errors=verify1.errors,
+                    )
+                )
+                if not force_continue:
+                    # Abort the whole run – caller must retry with force_continue=True
+                    self.logger.warning(
+                        f"Pre-check failed for {pkg_info.package_name}; "
+                        "aborting (force_continue=False)"
+                    )
+                    return TryVerifyResponse(
+                        results=results,
+                        evidence_pdf=None,
+                        evidence_html=None,
+                        published=False,
+                        session_changes=None,
+                    )
                 continue
 
+            await self._record_package_state(
+                attempt, pkg_info, RITMPackageAttemptState.PRECHECK_PASSED
+            )
+
+            # ── Create objects and rules ────────────────────────────────────
             create_result = await pkg_workflow.create_objects_and_rules()
             if create_result.errors:
                 results.append(
@@ -100,9 +167,28 @@ class RITMWorkflowService:
                 )
                 continue
 
+            await self._record_package_state(
+                attempt, pkg_info, RITMPackageAttemptState.CREATE_APPLIED
+            )
+
+            # ── Post-create verification ────────────────────────────────────
             verify2 = await pkg_workflow.verify_again()
             if not verify2.success:
+                # Delete the created rules; keep objects in session
                 await pkg_workflow.rollback_rules(create_result.created_rule_uids)
+
+                # Re-verify to see if rule deletion was sufficient
+                verify3 = await pkg_workflow.verify_post_delete()
+                if not verify3.success:
+                    # Still failing – discard entire session to clean up objects too
+                    await pkg_workflow.discard_session()
+
+                await self._record_package_state(
+                    attempt,
+                    pkg_info,
+                    RITMPackageAttemptState.POSTCHECK_FAILED_RULES_DELETED,
+                    "; ".join(verify2.errors),
+                )
                 results.append(
                     PackageResult(
                         domain=pkg_info.domain_name,
@@ -114,6 +200,14 @@ class RITMWorkflowService:
                     )
                 )
                 continue
+
+            # ── Success path ────────────────────────────────────────────────
+            await pkg_workflow.disable_rules(create_result.created_rule_uids)
+            await self._record_package_state(
+                attempt,
+                pkg_info,
+                RITMPackageAttemptState.VERIFIED_PENDING_APPROVAL_DISABLED,
+            )
 
             evidence = await pkg_workflow.capture_evidence()
             all_evidence.append(evidence)
@@ -143,6 +237,7 @@ class RITMWorkflowService:
         )
 
         import base64
+
         evidence_pdf_b64 = base64.b64encode(evidence_pdf).decode("utf-8") if evidence_pdf else None
 
         return TryVerifyResponse(
@@ -153,16 +248,72 @@ class RITMWorkflowService:
             session_changes=combined_session_changes,
         )
 
+    async def verify_policy_grouped(self, packages: list[PackageInfo]) -> GroupedVerifyResponse:
+        """Run pre-check verify-policy for every (domain, package) pair.
+
+        Used by the standalone /verify-policy endpoint so the user can review
+        failures before deciding to force_continue.
+        """
+        verifier = PolicyVerifier(self.client)
+        inputs = [
+            PackageVerifyInput(
+                domain_name=p.domain_name,
+                domain_uid=p.domain_uid,
+                package_name=p.package_name,
+                package_uid=p.package_uid,
+            )
+            for p in packages
+        ]
+        raw = await verifier.verify_policy_grouped(inputs)
+
+        pkg_results: list[PackageVerifyResult] = [
+            PackageVerifyResult(
+                domain_name=pkg.domain_name,
+                domain_uid=pkg.domain_uid,
+                package_name=pkg.package_name,
+                package_uid=pkg.package_uid,
+                success=res.success,
+                errors=res.errors,
+            )
+            for pkg, res in raw
+        ]
+        all_passed = all(r.success for r in pkg_results)
+        return GroupedVerifyResponse(all_passed=all_passed, results=pkg_results)
+
     async def _next_attempt(self) -> int:
         """Compute next attempt number – MAX(attempt)+1 for this RITM, or 1 if none."""
         async with AsyncSession(engine) as db:
             result = await db.execute(
-                select(func.max(RITMEvidenceSession.attempt)).where(
-                    col(RITMEvidenceSession.ritm_number) == self.ritm_number
+                select(func.max(RITMPackageAttempt.attempt)).where(
+                    col(RITMPackageAttempt.ritm_number) == self.ritm_number
                 )
             )
             max_val = result.scalar_one_or_none()
             return (max_val or 0) + 1
+
+    async def _record_package_state(
+        self,
+        attempt: int,
+        pkg_info: PackageInfo,
+        state: RITMPackageAttemptState,
+        error_message: str | None = None,
+    ) -> None:
+        """Persist a per-package state transition row in ritm_package_attempt."""
+        async with AsyncSession(engine) as db:
+            db.add(
+                RITMPackageAttempt(
+                    ritm_number=self.ritm_number,
+                    attempt=attempt,
+                    domain_uid=pkg_info.domain_uid,
+                    domain_name=pkg_info.domain_name,
+                    package_uid=pkg_info.package_uid,
+                    package_name=pkg_info.package_name,
+                    state=state,
+                    error_message=error_message,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
 
     async def _store_evidence_session(
         self, evidence: EvidenceData, attempt: int, session_type: str

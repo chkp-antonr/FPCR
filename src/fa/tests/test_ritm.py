@@ -1,7 +1,5 @@
 """Tests for RITM endpoints."""
 
-from types import SimpleNamespace
-
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -547,12 +545,14 @@ async def test_acquire_editor_lock(async_client: AsyncClient):
 @pytest.mark.asyncio
 async def test_acquire_editor_lock_already_locked_fails(async_client: AsyncClient):
     """Cannot acquire editor lock when another user holds it (simulated via direct DB)."""
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlmodel import col
+
     import fa.routes.ritm as ritm_module
     from fa.models import RITM
-    from sqlalchemy import select
-    from sqlmodel import col
 
     await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000011"})
     # Manually set editor lock to simulate another user
@@ -582,21 +582,23 @@ async def test_release_editor_lock(async_client: AsyncClient):
 async def test_reviewer_cannot_acquire_editor_lock(async_client: AsyncClient):
     """A user who has reviewed this RITM cannot acquire the editor lock."""
     from datetime import UTC, datetime
+
     from sqlalchemy.ext.asyncio import AsyncSession
+
     import fa.routes.ritm as ritm_module
     from fa.models import RITMReviewer
-    from sqlalchemy import select
-    from sqlmodel import col
 
     await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000013"})
     # Manually add testuser as reviewer
     async with AsyncSession(ritm_module.engine) as db:
-        db.add(RITMReviewer(
-            ritm_number="RITM0000013",
-            username="testuser",
-            action="rejected",
-            acted_at=datetime.now(UTC),
-        ))
+        db.add(
+            RITMReviewer(
+                ritm_number="RITM0000013",
+                username="testuser",
+                action="rejected",
+                acted_at=datetime.now(UTC),
+            )
+        )
         await db.commit()
 
     response = await async_client.post("/api/v1/ritm/RITM0000013/editor-lock")
@@ -744,7 +746,9 @@ async def test_next_attempt_returns_1_when_no_evidence(async_client: AsyncClient
 async def test_next_attempt_increments(async_client: AsyncClient):
     """_next_attempt returns max+1 when evidence sessions exist."""
     from datetime import UTC, datetime
+
     from sqlalchemy.ext.asyncio import AsyncSession
+
     import fa.routes.ritm as ritm_module
     import fa.services.ritm_workflow_service as svc_module
     from fa.models import RITMEvidenceSession
@@ -754,16 +758,18 @@ async def test_next_attempt_increments(async_client: AsyncClient):
     svc_module.engine = ritm_module.engine
 
     async with AsyncSession(ritm_module.engine) as db:
-        db.add(RITMEvidenceSession(
-            ritm_number="RITM0000041",
-            attempt=1,
-            domain_name="D1",
-            domain_uid="uid1",
-            package_name="P1",
-            package_uid="puid1",
-            session_type="initial",
-            created_at=datetime.now(UTC),
-        ))
+        db.add(
+            RITMEvidenceSession(
+                ritm_number="RITM0000041",
+                attempt=1,
+                domain_name="D1",
+                domain_uid="uid1",
+                package_name="P1",
+                package_uid="puid1",
+                session_type="initial",
+                created_at=datetime.now(UTC),
+            )
+        )
         await db.commit()
 
     service = RITMWorkflowService(client=None, ritm_number="RITM0000041", username="testuser")

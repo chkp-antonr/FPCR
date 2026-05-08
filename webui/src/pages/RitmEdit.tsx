@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { message, Modal, Button, Spin, Card, Typography, Alert, Space, Steps, Collapse } from 'antd';
+import { message, Modal, Button, Spin, Card, Typography, Alert, Space, Steps, Collapse, Checkbox, Tag } from 'antd';
 import { ArrowLeftOutlined, PlusOutlined } from '@ant-design/icons';
 import { ritmApi, domainsApi, packagesApi } from '../api/endpoints';
-import { RITM_STATUS, type RuleRow, type IpEntry, type ServiceEntry, type DomainInfo, type TryVerifyResponse } from '../types';
+import { RITM_STATUS, type RuleRow, type IpEntry, type ServiceEntry, type DomainInfo, type TryVerifyResponse, type GroupedVerifyResponse } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import IpInputPanel from '../components/IpInputPanel';
 import RulesTable from '../components/RulesTable';
@@ -48,10 +48,13 @@ export default function RitmEdit() {
   const [submitModalVisible, setSubmitModalVisible] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // Workflow state (plan → try & verify)
-  type WorkflowStep = 'idle' | 'planned' | 'verified';
+  // Workflow state (plan → pre-check → try & verify)
+  type WorkflowStep = 'idle' | 'prechecked' | 'planned' | 'verified';
   const [workflowStep, setWorkflowStep] = useState<WorkflowStep>('idle');
   const [planning, setPlanning] = useState(false);
+  const [preChecking, setPreChecking] = useState(false);
+  const [preCheckResult, setPreCheckResult] = useState<GroupedVerifyResponse | null>(null);
+  const [forceContinue, setForceContinue] = useState(false);
   const [verificationErrors, setVerificationErrors] = useState<string[]>([]);
   const [evidenceHtml, setEvidenceHtml] = useState<string | null>(null);
   const [evidenceYaml, setEvidenceYaml] = useState<string | null>(null);
@@ -430,6 +433,39 @@ export default function RitmEdit() {
     console.info(`[workflow ${ts}] ${text}`);
   };
 
+  const handlePreCheck = async () => {
+    setPreChecking(true);
+    setPreCheckResult(null);
+    setForceContinue(false);
+    setVerificationErrors([]);
+    addWorkflowLog('Running pre-check verify-policy...');
+    const hide = message.loading('Pre-check in progress...', 0);
+    try {
+      const result = await ritmApi.verifyPolicyGrouped(ritmNumber || '');
+      setPreCheckResult(result);
+      if (result.all_passed) {
+        setWorkflowStep('prechecked');
+        addWorkflowLog('Pre-check passed for all packages.');
+        message.success({ content: 'All packages passed pre-check.', key: 'wf', duration: 4 });
+      } else {
+        const failedNames = result.results.filter(r => !r.success).map(r => `${r.domain_name}/${r.package_name}`);
+        addWorkflowLog(`Pre-check failed for: ${failedNames.join(', ')}`);
+        result.results.filter(r => !r.success).forEach(r =>
+          r.errors.forEach(e => addWorkflowLog(`  ${r.package_name}: ${e}`))
+        );
+        message.warning({ content: 'Some packages failed pre-check. Review before continuing.', key: 'wf', duration: 5 });
+      }
+    } catch (error: any) {
+      const msg = extractErrorMsg(error, 'Pre-check failed');
+      setVerificationErrors([msg]);
+      addWorkflowLog(`Pre-check error: ${msg}`);
+      message.error({ content: 'Pre-check failed.', key: 'wf', duration: 5 });
+    } finally {
+      hide();
+      setPreChecking(false);
+    }
+  };
+
   const handleGeneratePlan = async () => {
     setPlanning(true);
     setVerificationErrors([]);
@@ -466,18 +502,29 @@ export default function RitmEdit() {
     addWorkflowLog('Try & Verify started...');
     const hide = message.loading('Try & Verify in progress...', 0);
     try {
-      const response = await ritmApi.tryVerifyRitm(ritmNumber || '');
+      // Compute skip list: packages that failed pre-check and force-continue is NOT checked
+      const skipPackageUids: string[] = [];
+      if (preCheckResult && !preCheckResult.all_passed) {
+        if (!forceContinue) {
+          preCheckResult.results.filter(r => !r.success).forEach(r => skipPackageUids.push(r.package_uid));
+        }
+      }
+
+      const response = await ritmApi.tryVerifyWithOptions(ritmNumber || '', {
+        force_continue: forceContinue,
+        skip_package_uids: skipPackageUids,
+      });
       setTryVerifyResult(response);
       setWorkflowStep('verified');
 
       // Log per-package results
       response.results.forEach(r => {
-        const statusMsg = {
+        const statusMsg = ({
           success: `✓ ${r.domain} / ${r.package}: SUCCESS (${r.rules_created} rules, ${r.objects_created} objects)`,
-          skipped: `⊘ ${r.domain} / ${r.package}: SKIPPED (pre-verify failed)`,
+          skipped: `⊘ ${r.domain} / ${r.package}: SKIPPED (pre-check failed)`,
           create_failed: `✗ ${r.domain} / ${r.package}: CREATE FAILED`,
-          verify_failed: `✗ ${r.domain} / ${r.package}: VERIFY FAILED (rules rolled back)`,
-        }[r.status] || `${r.domain} / ${r.package}: ${r.status}`;
+          verify_failed: `✗ ${r.domain} / ${r.package}: POST-CHECK FAILED (rules deleted)`,
+        } as Record<string, string>)[r.status] || `${r.domain} / ${r.package}: ${r.status}`;
 
         addWorkflowLog(statusMsg);
 
@@ -574,6 +621,8 @@ export default function RitmEdit() {
 
   const handleResetWorkflow = () => {
     setWorkflowStep('idle');
+    setPreCheckResult(null);
+    setForceContinue(false);
     setEvidenceYaml(null);
     setEvidenceChanges(null);
     setShowEvidence(false);
@@ -1068,27 +1117,91 @@ export default function RitmEdit() {
               <Steps
                 current={
                   workflowStep === 'idle' ? 0
-                  : workflowStep === 'planned' ? 1
+                  : workflowStep === 'prechecked' ? 1
                   : 2
                 }
                 size="small"
                 style={{ marginBottom: 16 }}
                 items={[
+                  { title: 'Pre-Check' },
                   { title: 'Plan' },
                   { title: 'Try & Verify' },
                 ]}
               />
 
               {workflowStep === 'idle' && (
-                <Button
-                  type="primary"
-                  onClick={handleGeneratePlan}
-                  disabled={planning || saving || rules.length === 0}
-                  loading={planning}
-                  block
-                >
-                  Generate YAML Plan
-                </Button>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Button
+                    type="primary"
+                    onClick={handlePreCheck}
+                    disabled={preChecking || saving || rules.length === 0}
+                    loading={preChecking}
+                    block
+                  >
+                    Run Pre-Check (Verify Policy)
+                  </Button>
+                </Space>
+              )}
+
+              {/* Pre-check results — shown on 'idle' when we have results and not all passed */}
+              {workflowStep === 'idle' && preCheckResult && !preCheckResult.all_passed && (
+                <Space direction="vertical" style={{ width: '100%', marginTop: 12 }}>
+                  <Alert
+                    type="warning"
+                    message="Some packages failed pre-check verification"
+                    showIcon
+                  />
+                  {preCheckResult.results.map(r => (
+                    <div key={r.package_uid} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Tag color={r.success ? 'green' : 'red'}>{r.success ? 'PASS' : 'FAIL'}</Tag>
+                      <Text style={{ fontSize: '0.9em' }}>{r.domain_name} / {r.package_name}</Text>
+                      {!r.success && r.errors.length > 0 && (
+                        <Text type="danger" style={{ fontSize: '0.85em' }}>— {r.errors[0]}</Text>
+                      )}
+                    </div>
+                  ))}
+                  <Checkbox
+                    checked={forceContinue}
+                    onChange={e => setForceContinue(e.target.checked)}
+                  >
+                    Force Continue — skip failed packages and proceed with passing ones
+                  </Checkbox>
+                  {forceContinue && (
+                    <Button
+                      type="primary"
+                      onClick={() => setWorkflowStep('prechecked')}
+                      block
+                    >
+                      Continue to Plan
+                    </Button>
+                  )}
+                </Space>
+              )}
+
+              {workflowStep === 'prechecked' && (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {preCheckResult && preCheckResult.all_passed ? (
+                    <Alert type="success" message="All packages passed pre-check." showIcon />
+                  ) : (
+                    preCheckResult && (
+                      <Alert
+                        type="warning"
+                        message={`${preCheckResult.results.filter(r => !r.success).length} package(s) will be skipped (Force Continue enabled)`}
+                        showIcon
+                      />
+                    )
+                  )}
+                  <Button
+                    type="primary"
+                    onClick={handleGeneratePlan}
+                    disabled={planning || saving}
+                    loading={planning}
+                    block
+                  >
+                    Generate YAML Plan
+                  </Button>
+                  <Button size="small" onClick={handleResetWorkflow}>Reset</Button>
+                </Space>
               )}
 
               {workflowStep === 'planned' && (
@@ -1096,6 +1209,9 @@ export default function RitmEdit() {
                   <Text type="secondary">
                     Review the planned changes above, then run Try & Verify.
                   </Text>
+                  {forceContinue && (
+                    <Alert type="warning" message="Force Continue is active — failed pre-check packages will be skipped." showIcon />
+                  )}
                   <Space>
                     <Button
                       type="primary"
@@ -1126,19 +1242,29 @@ export default function RitmEdit() {
 
                   {/* Show per-package results */}
                   {tryVerifyResult && tryVerifyResult.results.map(r => (
-                    <div key={r.package} style={{ fontSize: '0.9em' }}>
-                      <Text type={
-                        r.status === 'success' ? 'success' :
-                        r.status === 'skipped' ? 'secondary' :
-                        'danger'
-                      }>
-                        {r.domain} / {r.package}: {r.status.toUpperCase()}
-                        {r.rules_created > 0 && ` (${r.rules_created} rules, ${r.objects_created} objects)`}
-                      </Text>
+                    <div key={r.package} style={{ fontSize: '0.9em', marginBottom: 4 }}>
+                      <Space size={4}>
+                        <Tag color={
+                          r.status === 'success' ? 'green' :
+                          r.status === 'skipped' ? 'default' :
+                          'red'
+                        }>
+                          {r.status === 'success' ? 'SUCCESS' :
+                           r.status === 'skipped' ? 'SKIPPED (pre-check)' :
+                           r.status === 'verify_failed' ? 'POST-CHECK FAILED' :
+                           'CREATE FAILED'}
+                        </Tag>
+                        <Text style={{ fontSize: '0.9em' }}>{r.domain} / {r.package}</Text>
+                        {r.status === 'success' && (
+                          <Text type="secondary" style={{ fontSize: '0.85em' }}>
+                            {r.rules_created} rules, {r.objects_created} objects
+                          </Text>
+                        )}
+                      </Space>
                       {r.errors.length > 0 && (
-                        <ul style={{ margin: '4px 0 0 20', padding: 0 }}>
+                        <ul style={{ margin: '2px 0 0 24px', padding: 0 }}>
                           {r.errors.map((err, i) => (
-                            <li key={i}><Text type="danger">{err}</Text></li>
+                            <li key={i}><Text type="danger" style={{ fontSize: '0.85em' }}>{err}</Text></li>
                           ))}
                         </ul>
                       )}
@@ -1270,7 +1396,7 @@ export default function RitmEdit() {
               </button>
               {workflowStep !== 'verified' && rules.length > 0 && (
                 <Text type="warning" style={{ fontSize: '0.9em' }}>
-                  Complete all workflow steps before submitting
+                  Complete the full workflow (Pre-Check → Plan → Try & Verify) before submitting
                 </Text>
               )}
             </div>

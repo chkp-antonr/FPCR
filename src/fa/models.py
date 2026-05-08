@@ -1,7 +1,7 @@
 """Pydantic models for API requests and responses."""
 
 from datetime import UTC, datetime
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel
@@ -24,6 +24,8 @@ _known_tables = {
     "ritm_editors",
     "ritm_reviewers",
     "ritm_evidence_sessions",
+    "ritm_package_attempt",
+    "ritm_edit_snapshot",
 }
 if _known_tables & SQLModel.metadata.tables.keys():
     SQLModel.metadata.clear()
@@ -36,6 +38,18 @@ class RITMStatus(IntEnum):
     READY_FOR_APPROVAL = 1
     APPROVED = 2
     COMPLETED = 3
+
+
+class RITMPackageAttemptState(StrEnum):
+    """Per-package attempt state in workflow."""
+
+    PRECHECK_PASSED = "precheck_passed"
+    PRECHECK_FAILED_SKIPPED = "precheck_failed_skipped"
+    CREATE_APPLIED = "create_applied"
+    POSTCHECK_FAILED_RULES_DELETED = "postcheck_failed_rules_deleted"
+    VERIFIED_PENDING_APPROVAL_DISABLED = "verified_pending_approval_disabled"
+    APPROVAL_ENABLED_PUBLISHED = "approval_enabled_published"
+    APPROVAL_FAILED_REVERTED_DISABLED = "approval_failed_reverted_disabled"
 
 
 class LoginRequest(BaseModel):
@@ -371,8 +385,65 @@ class RITMEvidenceSession(SQLModel, table=True):
     created_at: datetime = Field(sa_column=Column(DateTime(), default=lambda: datetime.now(UTC)))
 
 
+class RITMPackageAttempt(SQLModel, table=True):
+    """Per-package state tracking for each workflow attempt."""
+
+    __tablename__ = cast(Any, "ritm_package_attempt")
+    __table_args__ = (UniqueConstraint("ritm_number", "attempt", "domain_uid", "package_uid"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    ritm_number: str = Field(foreign_key="ritm.ritm_number", index=True)
+    attempt: int
+    domain_uid: str
+    domain_name: str
+    package_uid: str
+    package_name: str
+    state: RITMPackageAttemptState
+    error_message: str | None = None
+    created_at: datetime = Field(sa_column=Column(DateTime(), default=lambda: datetime.now(UTC)))
+
+
+class RITMEditSnapshot(SQLModel, table=True):
+    """Single latest edit snapshot per RITM for correction diff calculations."""
+
+    __tablename__ = cast(Any, "ritm_edit_snapshot")
+
+    id: int | None = Field(default=None, primary_key=True)
+    ritm_number: str = Field(unique=True, foreign_key="ritm.ritm_number", index=True)
+    snapshot_attempt: int | None = None
+    rules_json: str | None = None
+    objects_json: str | None = None
+    created_at: datetime = Field(sa_column=Column(DateTime(), default=lambda: datetime.now(UTC)))
+    updated_at: datetime = Field(sa_column=Column(DateTime(), default=lambda: datetime.now(UTC)))
+
+
 # Backward compatibility alias
 RITMSession = RITMEvidenceSession
+
+
+class PackageVerifyResult(BaseModel):
+    """Pre-check verification result for a single (domain, package) pair."""
+
+    domain_name: str
+    domain_uid: str
+    package_name: str
+    package_uid: str
+    success: bool
+    errors: list[str] = []
+
+
+class GroupedVerifyResponse(BaseModel):
+    """Grouped pre-check results keyed by domain → package."""
+
+    all_passed: bool
+    results: list[PackageVerifyResult]
+
+
+class TryVerifyRequest(BaseModel):
+    """Request body for the try-verify endpoint."""
+
+    force_continue: bool = False
+    skip_package_uids: list[str] = []
 
 
 class ReviewerItem(BaseModel):

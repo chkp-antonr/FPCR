@@ -6,8 +6,13 @@ import type {
   CreateRuleRequest,
   Domains2BatchRequest,
   DomainsResponse,
+  EvidenceHistoryResponse,
+  EvidenceResponse,
+  GroupedVerifyResponse,
   LoginRequest,
   PackagesResponse,
+  PlanYamlResponse,
+  PolicyItem,
   PublishResponse,
   RITMCreateRequest,
   RITMItem,
@@ -16,13 +21,11 @@ import type {
   RITMWithPolicies,
   SectionsResponse,
   TopologyResponse,
+  TryVerifyRequest,
+  TryVerifyResponse,
   UserInfo,
-  PolicyItem,
-  PlanYamlResponse,
   ApplyResponse,
   VerifyResponse,
-  TryVerifyResponse,
-  EvidenceResponse,
 } from '../types';
 
 export const authApi = {
@@ -179,6 +182,14 @@ export const ritmApi = {
     return response.data;
   },
 
+  verifyPolicyGrouped: async (ritmNumber: string): Promise<GroupedVerifyResponse> => {
+    const response = await apiClient.post<GroupedVerifyResponse>(
+      `/api/v1/ritm/${ritmNumber}/verify-policy`
+    );
+    return response.data;
+  },
+
+  // Legacy single-package verify (kept for backwards compat)
   verifyPolicy: async (ritmNumber: string, domainUid: string, packageUid: string): Promise<any> => {
     const response = await apiClient.post<any>(
       `/api/v1/ritm/${ritmNumber}/verify-policy?domain_uid=${encodeURIComponent(domainUid)}&package_uid=${encodeURIComponent(packageUid)}`
@@ -213,6 +224,17 @@ export const ritmApi = {
     return response.data;
   },
 
+  tryVerifyWithOptions: async (
+    ritmNumber: string,
+    options: TryVerifyRequest
+  ): Promise<TryVerifyResponse> => {
+    const response = await apiClient.post<TryVerifyResponse>(
+      `/api/v1/ritm/${ritmNumber}/try-verify`,
+      options
+    );
+    return response.data;
+  },
+
   recreateEvidence: async (ritmNumber: string): Promise<EvidenceResponse> => {
     const response = await apiClient.post<EvidenceResponse>(
       `/api/v1/ritm/${ritmNumber}/recreate-evidence`
@@ -235,8 +257,10 @@ export const ritmApi = {
     return response.data;
   },
 
-  getEvidenceHistory: async (ritmNumber: string): Promise<{ domains: { domain_name: string; packages: any[] }[] }> => {
-    const response = await apiClient.get(`/api/v1/ritm/${ritmNumber}/evidence-history`);
+  getEvidenceHistory: async (ritmNumber: string): Promise<EvidenceHistoryResponse> => {
+    const response = await apiClient.get<EvidenceHistoryResponse>(
+      `/api/v1/ritm/${ritmNumber}/evidence-history`
+    );
     return response.data;
   },
 };

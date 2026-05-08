@@ -3,6 +3,7 @@
 import json
 import re
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,11 +19,11 @@ from ..config import settings
 from ..db import engine
 from ..models import (
     RITM,
-    CachedSection,
     DomainEvidenceItem,
     EvidenceHistoryResponse,
     EvidenceResponse,
     EvidenceSessionItem,
+    GroupedVerifyResponse,
     MatchObjectsRequest,
     MatchObjectsResponse,
     MatchResult,
@@ -32,8 +33,11 @@ from ..models import (
     PublishResponse,
     RITMCreatedRule,
     RITMEvidenceSession,
+    RITMPackageAttempt,
+    RITMPackageAttemptState,
     RITMStatus,
     RITMVerification,
+    TryVerifyRequest,
     TryVerifyResponse,
 )
 from ..services.evidence_generator import EvidenceGenerator
@@ -42,6 +46,7 @@ from ..services.object_matcher import ObjectMatcher
 from ..services.policy_verifier import PolicyVerifier
 from ..services.ritm_workflow_service import RITMWorkflowService
 from ..services.session_changes_pdf import SessionChangesPDFGenerator
+from ..services.snapshot_service import SnapshotService
 from ..session import SessionData, session_manager
 
 logger = get_logger(__name__)
@@ -110,10 +115,8 @@ def _group_rows_by_attempt(rows: Sequence[RITMEvidenceSession]) -> list[dict[str
         att = bucket[row.attempt]
         sc: dict[str, Any] = {}
         if row.session_changes:
-            try:
+            with suppress(Exception):
                 sc = json.loads(row.session_changes)
-            except Exception:
-                pass
         dc = att["session_changes"]["domain_changes"]
         if row.domain_name not in dc:
             dc[row.domain_name] = {}
@@ -355,31 +358,19 @@ async def plan_yaml(
     return PlanYamlResponse(yaml=yaml, changes=changes)
 
 
-@router.post("/ritm/{ritm_number}/try-verify")
-async def try_verify_ritm(
+@router.post("/ritm/{ritm_number}/verify-policy")
+async def verify_policy_pre_check(
     ritm_number: str,
     session: SessionData = Depends(get_session_data),
-) -> TryVerifyResponse:
-    """Execute Try & Verify workflow with automatic rollback and disable.
+) -> GroupedVerifyResponse:
+    """Run pre-check verify-policy for every (domain, package) in the RITM.
 
-    Workflow for each package:
-    1. Verify policy (pre-check) - skip package on failure
-    2. Create objects and rules - skip package on failure
-    3. Verify policy again (post-creation)
-    4. On verify failure: rollback rules, continue
-    5. On verify success: capture evidence, disable rules
-
-    After all packages:
-    - Combine evidence into single PDF/HTML
-    - Store session UIDs for evidence re-creation
-    - Publish if any packages succeeded
+    Returns grouped results so the UI can show failures per domain/package
+    and let the user decide whether to force-continue.
     """
     async with AsyncSession(engine) as db:
-        from ..models import RITM
-
         ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
-        ritm = ritm_result.scalar_one_or_none()
-        if not ritm:
+        if not ritm_result.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="RITM not found")
 
     try:
@@ -394,7 +385,56 @@ async def try_verify_ritm(
                 ritm_number=ritm_number,
                 username=session.username,
             )
-            result = await workflow.try_verify()
+            packages = await workflow._group_by_package()
+            return await workflow.verify_policy_grouped(packages)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in verify_policy for RITM {ritm_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/ritm/{ritm_number}/try-verify")
+async def try_verify_ritm(
+    ritm_number: str,
+    body: TryVerifyRequest = TryVerifyRequest(),
+    session: SessionData = Depends(get_session_data),
+) -> TryVerifyResponse:
+    """Execute Try & Verify workflow with automatic rollback and disable.
+
+    Workflow for each package:
+    1. Verify policy (pre-check) – if failed and force_continue=False, abort.
+    2. Create objects and rules.
+    3. Verify policy again (post-creation).
+    4. On verify failure: delete rules, re-verify, discard session if still failing.
+    5. On verify success: disable rules, capture evidence.
+
+    After all packages:
+    - Combine evidence into single PDF/HTML.
+    - Store per-package state in ritm_package_attempt.
+    """
+    async with AsyncSession(engine) as db:
+        ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        if not ritm_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="RITM not found")
+
+    try:
+        async with CPAIOPSClient(
+            engine=engine,
+            username=session.username,
+            password=session.password,
+            mgmt_ip=settings.api_mgmt,
+        ) as client:
+            workflow = RITMWorkflowService(
+                client=client,
+                ritm_number=ritm_number,
+                username=session.username,
+            )
+            result = await workflow.try_verify(
+                force_continue=body.force_continue,
+                skip_package_uids=set(body.skip_package_uids),
+            )
             return result
 
     except HTTPException:
@@ -409,11 +449,15 @@ async def submit_for_approval(
     ritm_number: str,
     session: SessionData = Depends(get_session_data),
 ) -> PublishResponse:
-    """Disable enabled rules, publish session, then mark RITM as Ready for Approval.
+    """Publish disabled rules to Check Point and mark RITM as Ready for Approval.
 
-    1. Disable rules from ritm_created_rules (they were created enabled during Try & Verify)
-    2. Publish — commits disabled rules to Check Point
-    3. Update RITM status to READY_FOR_APPROVAL
+    Gates: caller must hold the editor lock; at least one package must have reached
+    VERIFIED_PENDING_APPROVAL_DISABLED state in the latest attempt.
+
+    1. Verify at least one package is in VERIFIED_PENDING_APPROVAL_DISABLED.
+    2. Create/overwrite edit snapshot for future correction diffs.
+    3. Publish per-domain sessions (rules are already disabled).
+    4. Update RITM status to READY_FOR_APPROVAL.
     """
     async with AsyncSession(engine) as db:
         ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
@@ -421,7 +465,32 @@ async def submit_for_approval(
         if not ritm:
             raise HTTPException(status_code=404, detail="RITM not found")
         if ritm.editor_locked_by != session.username:
-            raise HTTPException(status_code=400, detail="You must hold the editor lock to submit for approval")
+            raise HTTPException(
+                status_code=400, detail="You must hold the editor lock to submit for approval"
+            )
+
+        # Gate: require at least one verified package in the latest attempt
+        max_attempt_result = await db.execute(
+            select(func.max(RITMPackageAttempt.attempt)).where(
+                col(RITMPackageAttempt.ritm_number) == ritm_number
+            )
+        )
+        max_attempt = max_attempt_result.scalar_one_or_none() or 0
+
+        verified_result = await db.execute(
+            select(RITMPackageAttempt).where(
+                col(RITMPackageAttempt.ritm_number) == ritm_number,
+                col(RITMPackageAttempt.attempt) == max_attempt,
+                col(RITMPackageAttempt.state)
+                == RITMPackageAttemptState.VERIFIED_PENDING_APPROVAL_DISABLED,
+            )
+        )
+        verified_packages = verified_result.scalars().all()
+        if not verified_packages:
+            raise HTTPException(
+                status_code=400,
+                detail="No packages are in verified state. Run Try & Verify successfully first.",
+            )
 
         policies_result = await db.execute(
             select(Policy).where(col(Policy.ritm_number) == ritm_number)
@@ -433,10 +502,17 @@ async def submit_for_approval(
         )
         created_rules = list(rules_result.scalars().all())
 
+    # Snapshot current rules for future correction diffs
+    snapshot_svc = SnapshotService()
+    await snapshot_svc.create_or_overwrite(ritm_number=ritm_number, attempt=max_attempt)
+
     # Build per-package metadata from policies
     pkg_meta: dict[tuple[str, str], tuple[str, str]] = {}
     for policy in policies:
-        pkg_meta[(policy.domain_uid, policy.package_uid)] = (policy.domain_name, policy.package_name)
+        pkg_meta[(policy.domain_uid, policy.package_uid)] = (
+            policy.domain_name,
+            policy.package_name,
+        )
 
     rules_by_pkg: dict[tuple[str, str], list[RITMCreatedRule]] = {}
     for rule in created_rules:
@@ -457,7 +533,7 @@ async def submit_for_approval(
             for (domain_uid, package_uid), (domain_name, _package_name) in pkg_meta.items():
                 pkg_rules = rules_by_pkg.get((domain_uid, package_uid), [])
 
-                # Disable all rules created during Try & Verify
+                # Ensure all rules are disabled before publish
                 for rule in pkg_rules:
                     result = await client.api_call(
                         mgmt_name=mgmt_name,
@@ -507,11 +583,10 @@ async def submit_for_approval(
 
     return PublishResponse(
         success=True,
-        message=f"Rules disabled and published for RITM {ritm_number}. Ready for approval.",
+        message=f"Rules published (disabled) for RITM {ritm_number}. Ready for approval.",
         created=success_count,
         errors=errors,
     )
-
 
 
 @router.post("/ritm/{ritm_number}/publish")
@@ -550,14 +625,14 @@ async def publish_ritm(
         )
         created_rules = list(rules_result.scalars().all())
 
-        # Compute approval attempt number
-        attempt_result = await db.execute(
-            select(func.max(RITMEvidenceSession.attempt)).where(
-                col(RITMEvidenceSession.ritm_number) == ritm_number
+        # Approval attempt = one beyond the latest try-verify attempt
+        max_attempt_result = await db.execute(
+            select(func.max(RITMPackageAttempt.attempt)).where(
+                col(RITMPackageAttempt.ritm_number) == ritm_number
             )
         )
-        max_attempt = attempt_result.scalar_one_or_none()
-        attempt = (max_attempt or 0) + 1
+        max_attempt = max_attempt_result.scalar_one_or_none() or 0
+        approval_attempt = max_attempt + 1
 
     # Build per-package rule lists
     rules_by_pkg: dict[tuple[str, str], list[RITMCreatedRule]] = {}
@@ -565,9 +640,14 @@ async def publish_ritm(
         rules_by_pkg.setdefault((rule.domain_uid, rule.package_uid), []).append(rule)
 
     # Build domain/package name lookup from policies
-    pkg_meta: dict[tuple[str, str], tuple[str, str]] = {}  # (domain_uid, pkg_uid) -> (domain_name, pkg_name)
+    pkg_meta: dict[
+        tuple[str, str], tuple[str, str]
+    ] = {}  # (domain_uid, pkg_uid) -> (domain_name, pkg_name)
     for policy in policies:
-        pkg_meta[(policy.domain_uid, policy.package_uid)] = (policy.domain_name, policy.package_name)
+        pkg_meta[(policy.domain_uid, policy.package_uid)] = (
+            policy.domain_name,
+            policy.package_name,
+        )
 
     errors: list[str] = []
     success_count = 0
@@ -607,6 +687,7 @@ async def publish_ritm(
                     domain_name=domain_name, package_name=package_name
                 )
                 if not verify_result.success:
+                    # Re-disable enabled rules and record failure state
                     for uid in enabled_uids:
                         await client.api_call(
                             mgmt_name=mgmt_name,
@@ -614,6 +695,21 @@ async def publish_ritm(
                             command="set-access-rule",
                             payload={"uid": uid, "enabled": False},
                         )
+                    async with AsyncSession(engine) as db:
+                        db.add(
+                            RITMPackageAttempt(
+                                ritm_number=ritm_number,
+                                attempt=approval_attempt,
+                                domain_uid=domain_uid,
+                                domain_name=domain_name,
+                                package_uid=package_uid,
+                                package_name=package_name,
+                                state=RITMPackageAttemptState.APPROVAL_FAILED_REVERTED_DISABLED,
+                                error_message="; ".join(verify_result.errors),
+                                created_at=datetime.now(UTC),
+                            )
+                        )
+                        await db.commit()
                     errors.extend(verify_result.errors)
                     continue
 
@@ -626,7 +722,9 @@ async def publish_ritm(
                 )
                 session_uid: str | None = None
                 if session_result.success and session_result.data:
-                    session_uid = session_result.data.get("uid") or session_result.data.get("session-uid")
+                    session_uid = session_result.data.get("uid") or session_result.data.get(
+                        "session-uid"
+                    )
 
                 sc_result = await client.api_call(
                     mgmt_name=mgmt_name,
@@ -651,7 +749,7 @@ async def publish_ritm(
                         db.add(
                             RITMEvidenceSession(
                                 ritm_number=ritm_number,
-                                attempt=attempt,
+                                attempt=approval_attempt,
                                 domain_name=domain_name,
                                 domain_uid=domain_uid,
                                 package_name=package_name,
@@ -659,12 +757,43 @@ async def publish_ritm(
                                 session_uid=session_uid,
                                 sid="",
                                 session_type="approval",
-                                session_changes=json.dumps(session_changes) if session_changes else None,
+                                session_changes=json.dumps(session_changes)
+                                if session_changes
+                                else None,
+                                created_at=datetime.now(UTC),
+                            )
+                        )
+                        db.add(
+                            RITMPackageAttempt(
+                                ritm_number=ritm_number,
+                                attempt=approval_attempt,
+                                domain_uid=domain_uid,
+                                domain_name=domain_name,
+                                package_uid=package_uid,
+                                package_name=package_name,
+                                state=RITMPackageAttemptState.APPROVAL_ENABLED_PUBLISHED,
                                 created_at=datetime.now(UTC),
                             )
                         )
                         await db.commit()
                 else:
+                    async with AsyncSession(engine) as db:
+                        db.add(
+                            RITMPackageAttempt(
+                                ritm_number=ritm_number,
+                                attempt=approval_attempt,
+                                domain_uid=domain_uid,
+                                domain_name=domain_name,
+                                package_uid=package_uid,
+                                package_name=package_name,
+                                state=RITMPackageAttemptState.APPROVAL_FAILED_REVERTED_DISABLED,
+                                error_message=pub_result.message
+                                or pub_result.code
+                                or "Publish failed",
+                                created_at=datetime.now(UTC),
+                            )
+                        )
+                        await db.commit()
                     errors.append(
                         f"Publish failed for {domain_name}: {pub_result.message or pub_result.code}"
                     )
@@ -709,9 +838,7 @@ async def recreate_evidence(
             raise HTTPException(status_code=404, detail="RITM not found")
 
         sessions_result = await db.execute(
-            select(RITMEvidenceSession).where(
-                col(RITMEvidenceSession.ritm_number) == ritm_number
-            )
+            select(RITMEvidenceSession).where(col(RITMEvidenceSession.ritm_number) == ritm_number)
         )
         evidence_rows = sessions_result.scalars().all()
 
@@ -765,10 +892,8 @@ async def recreate_evidence(
                 for row in refreshed_result.scalars().all():
                     sc: dict[str, Any] = {}
                     if row.session_changes:
-                        try:
+                        with suppress(Exception):
                             sc = json.loads(row.session_changes)
-                        except Exception:
-                            pass
                     if row.domain_name not in combined["domain_changes"]:
                         combined["domain_changes"][row.domain_name] = {}
                     combined["domain_changes"][row.domain_name].update(sc)
@@ -833,10 +958,8 @@ async def get_evidence_history(
 
         sc: dict | None = None
         if row.session_changes:
-            try:
+            with suppress(Exception):
                 sc = json.loads(row.session_changes)
-            except Exception:
-                pass
 
         domains_map[row.domain_name][row.package_name].append(
             EvidenceSessionItem(
@@ -1438,9 +1561,7 @@ async def get_session_pdf(
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
-            headers={
-                "Content-Disposition": f'attachment; filename="{ritm_number}_evidence.pdf"'
-            },
+            headers={"Content-Disposition": f'attachment; filename="{ritm_number}_evidence.pdf"'},
         )
     except Exception as e:
         logger.error(f"PDF generation failed for RITM {ritm_number}: {e}", exc_info=True)

@@ -16,6 +16,7 @@ from ..models import (
     RITM,
     Policy,
     PolicyItem,
+    ReviewerItem,
     RITMCreateRequest,
     RITMEditor,
     RITMItem,
@@ -24,8 +25,8 @@ from ..models import (
     RITMStatus,
     RITMUpdateRequest,
     RITMWithPolicies,
-    ReviewerItem,
 )
+from ..services.snapshot_service import SnapshotService
 from ..session import SessionData, session_manager
 
 logger = logging.getLogger(__name__)
@@ -225,10 +226,13 @@ async def update_ritm(
                     )
                 )
                 if not editor_result.scalar_one_or_none():
-                    raise HTTPException(status_code=400, detail="Only editors can submit for approval")
+                    raise HTTPException(
+                        status_code=400, detail="Only editors can submit for approval"
+                    )
                 if ritm.editor_locked_by != session.username:
                     raise HTTPException(
-                        status_code=400, detail="You must hold the editor lock to submit for approval"
+                        status_code=400,
+                        detail="You must hold the editor lock to submit for approval",
                     )
                 ritm.date_updated = datetime.now(UTC)
 
@@ -485,7 +489,9 @@ async def acquire_editor_lock(
             if locked_at:
                 if locked_at.tzinfo is None:
                     locked_at = locked_at.replace(tzinfo=UTC)
-                if datetime.now(UTC) - locked_at < timedelta(minutes=settings.approval_lock_minutes):
+                if datetime.now(UTC) - locked_at < timedelta(
+                    minutes=settings.approval_lock_minutes
+                ):
                     raise HTTPException(
                         status_code=400,
                         detail=f"RITM is locked by {ritm.editor_locked_by}",
@@ -503,6 +509,25 @@ async def acquire_editor_lock(
         await db.refresh(ritm)
 
         logger.info(f"Editor lock acquired for RITM {ritm_number} by {session.username}")
+
+    # Snapshot current rules so the upcoming correction attempt can diff against them
+    from sqlalchemy import func as sa_func
+    from sqlmodel import col as sa_col
+
+    from ..models import RITMPackageAttempt
+
+    async with AsyncSession(engine) as _db:
+        attempt_result = await _db.execute(
+            select(sa_func.max(RITMPackageAttempt.attempt)).where(
+                sa_col(RITMPackageAttempt.ritm_number) == ritm_number
+            )
+        )
+        current_attempt = attempt_result.scalar_one_or_none() or 0
+    await SnapshotService().create_or_overwrite(ritm_number=ritm_number, attempt=current_attempt)
+
+    async with AsyncSession(engine) as db:
+        result2 = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        ritm = result2.scalar_one()
         return await _ritm_to_item(db, ritm)
 
 

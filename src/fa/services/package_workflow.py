@@ -284,6 +284,50 @@ class PackageWorkflowService:
             f"[{self.info.package_name}] Step: disable_rules | Disabled {len(rule_uids)} rules"
         )
 
+    async def discard_session(self) -> None:
+        """Discard all uncommitted changes in the current domain session.
+
+        Called after a post-create verify failure when rules have been deleted
+        but the session still contains orphaned objects that cannot be cleaned up
+        by re-verification alone.
+        """
+        try:
+            result = await self.client.api_call(
+                mgmt_name=self.mgmt_name,
+                domain=self.info.domain_name,
+                command="discard",
+                payload={},
+            )
+            if result.success:
+                self.logger.info(
+                    f"[{self.info.package_name}] Step: discard_session | Session discarded"
+                )
+            else:
+                self.logger.warning(
+                    f"[{self.info.package_name}] Step: discard_session | "
+                    f"Failed: {result.message or result.code}"
+                )
+        except Exception as e:
+            self.logger.warning(
+                f"[{self.info.package_name}] Error discarding session: {e}",
+                exc_info=True,
+            )
+
+    async def verify_post_delete(self) -> VerificationResult:
+        """Verify policy after rules have been deleted.
+
+        Called after rollback_rules() to confirm the domain is clean before
+        deciding whether to also discard the session.
+        """
+        verifier = PolicyVerifier(self.client)
+        result = await verifier.verify_policy(
+            domain_name=self.info.domain_name,
+            package_name=self.info.package_name,
+        )
+        status = "PASS" if result.success else "FAIL"
+        self.logger.info(f"[{self.info.package_name}] Step: verify_post_delete | Status: {status}")
+        return result
+
     async def capture_evidence(self) -> EvidenceData:
         """Capture show-changes for this package's session.
 

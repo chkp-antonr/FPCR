@@ -26,42 +26,48 @@ async def test_evidence_history_grouped_correctly(async_client: AsyncClient):
     await async_client.post("/api/v1/ritm", json={"ritm_number": "RITM0000061"})
 
     async with AsyncSession(ritm_module.engine) as db:
-        db.add(RITMEvidenceSession(
-            ritm_number="RITM0000061",
-            attempt=1,
-            domain_name="DomainA",
-            domain_uid="da-uid",
-            package_name="PkgX",
-            package_uid="px-uid",
-            session_uid="s1",
-            session_type="initial",
-            session_changes='{"test": 1}',
-            created_at=datetime.now(UTC),
-        ))
-        db.add(RITMEvidenceSession(
-            ritm_number="RITM0000061",
-            attempt=2,
-            domain_name="DomainA",
-            domain_uid="da-uid",
-            package_name="PkgX",
-            package_uid="px-uid",
-            session_uid="s2",
-            session_type="correction",
-            session_changes='{"test": 2}',
-            created_at=datetime.now(UTC),
-        ))
-        db.add(RITMEvidenceSession(
-            ritm_number="RITM0000061",
-            attempt=2,
-            domain_name="DomainB",
-            domain_uid="db-uid",
-            package_name="PkgY",
-            package_uid="py-uid",
-            session_uid="s3",
-            session_type="correction",
-            session_changes='{"test": 3}',
-            created_at=datetime.now(UTC),
-        ))
+        db.add(
+            RITMEvidenceSession(
+                ritm_number="RITM0000061",
+                attempt=1,
+                domain_name="DomainA",
+                domain_uid="da-uid",
+                package_name="PkgX",
+                package_uid="px-uid",
+                session_uid="s1",
+                session_type="initial",
+                session_changes='{"test": 1}',
+                created_at=datetime.now(UTC),
+            )
+        )
+        db.add(
+            RITMEvidenceSession(
+                ritm_number="RITM0000061",
+                attempt=2,
+                domain_name="DomainA",
+                domain_uid="da-uid",
+                package_name="PkgX",
+                package_uid="px-uid",
+                session_uid="s2",
+                session_type="correction",
+                session_changes='{"test": 2}',
+                created_at=datetime.now(UTC),
+            )
+        )
+        db.add(
+            RITMEvidenceSession(
+                ritm_number="RITM0000061",
+                attempt=2,
+                domain_name="DomainB",
+                domain_uid="db-uid",
+                package_name="PkgY",
+                package_uid="py-uid",
+                session_uid="s3",
+                session_type="correction",
+                session_changes='{"test": 3}',
+                created_at=datetime.now(UTC),
+            )
+        )
         await db.commit()
 
     response = await async_client.get("/api/v1/ritm/RITM0000061/evidence-history")

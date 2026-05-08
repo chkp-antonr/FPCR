@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { message, Modal, Button, Spin, Card, Typography, Alert, Space, Input, Row, Col, Statistic } from 'antd';
+import { message, Modal, Button, Spin, Card, Typography, Alert, Space, Input, Row, Col, Statistic, Tag, Collapse } from 'antd';
 import { ArrowLeftOutlined, CheckOutlined, CloseOutlined, LockOutlined } from '@ant-design/icons';
 import { ritmApi } from '../api/endpoints';
-import { RITM_STATUS, type RITMItem, type PolicyItem } from '../types';
+import { RITM_STATUS, type EvidenceHistoryResponse, type RITMItem, type PolicyItem } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import RulesTable from '../components/RulesTable';
 import styles from '../styles/pages/ritm-approve.module.css';
@@ -40,7 +40,7 @@ export default function RitmApprove() {
   const [approveModalVisible, setApproveModalVisible] = useState(false);
   const [returnModalVisible, setReturnModalVisible] = useState(false);
   const [feedback, setFeedback] = useState('');
-  const [sessionChangesAvailable, setSessionChangesAvailable] = useState(false);
+  const [evidenceHistory, setEvidenceHistory] = useState<EvidenceHistoryResponse | null>(null);
   const [sessionHtml, setSessionHtml] = useState<string | null>(null);
   const [htmlLoading, setHtmlLoading] = useState(false);
   const [showSessionHtml, setShowSessionHtml] = useState(false);
@@ -123,18 +123,18 @@ export default function RitmApprove() {
   }, [ritm, ritmNumber, lockInfo.locked]);
 
   useEffect(() => {
-    const checkSessionChangesAvailable = async () => {
+    const loadEvidenceHistory = async () => {
       if (!ritmNumber) return;
       try {
         const history = await ritmApi.getEvidenceHistory(ritmNumber);
-        setSessionChangesAvailable(history.domains && history.domains.length > 0);
+        setEvidenceHistory(history);
       } catch (err) {
         console.error('getEvidenceHistory failed:', err);
-        setSessionChangesAvailable(false);
+        setEvidenceHistory(null);
       }
     };
 
-    checkSessionChangesAvailable();
+    loadEvidenceHistory();
   }, [ritm, ritmNumber]);
 
   const handleApprove = async () => {
@@ -392,8 +392,55 @@ export default function RitmApprove() {
             </Button>
           </Space>
 
-          {!sessionChangesAvailable && (
+          {(!evidenceHistory || evidenceHistory.domains.length === 0) && (
             <Text type="secondary">No evidence sessions found for this RITM.</Text>
+          )}
+
+          {evidenceHistory && evidenceHistory.domains.length > 0 && (
+            <Collapse
+              size="small"
+              items={evidenceHistory.domains.map((domain) => ({
+                key: domain.domain_uid,
+                label: `${domain.domain_name} (${domain.packages.length} package${domain.packages.length === 1 ? '' : 's'})`,
+                children: (
+                  <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                    {domain.packages.map((pkg) => (
+                      <Card
+                        key={pkg.package_uid}
+                        size="small"
+                        title={pkg.package_name}
+                        bodyStyle={{ paddingTop: 12, paddingBottom: 12 }}
+                      >
+                        <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                          {pkg.sessions.map((session) => {
+                            const typeColor =
+                              session.session_type === 'approval'
+                                ? 'blue'
+                                : session.session_type === 'correction'
+                                  ? 'orange'
+                                  : 'green';
+                            return (
+                              <div key={session.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                                <Space size={8} wrap>
+                                  <Tag color={typeColor}>{session.session_type.toUpperCase()}</Tag>
+                                  <Text>Attempt {session.attempt}</Text>
+                                  <Text type="secondary">
+                                    {new Date(session.created_at).toLocaleString()}
+                                  </Text>
+                                </Space>
+                                <Text type="secondary" style={{ fontSize: '0.85em' }}>
+                                  {session.session_uid ? `Session ${session.session_uid}` : 'No session UID'}
+                                </Text>
+                              </div>
+                            );
+                          })}
+                        </Space>
+                      </Card>
+                    ))}
+                  </Space>
+                ),
+              }))}
+            />
           )}
 
           {showSessionHtml && sessionHtml && (

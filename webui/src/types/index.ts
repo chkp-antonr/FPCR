@@ -358,3 +358,50 @@ export interface EvidenceResponse {
   changes: Record<string, unknown>;
 }
 
+export interface EvidenceSessionItem {
+  id: number;
+  attempt: number;
+  session_type: string;
+  session_uid: string | null;
+  sid: string | null;
+  created_at: string;
+  session_changes: Record<string, unknown> | null;
+}
+
+export interface PackageEvidenceItem {
+  package_name: string;
+  package_uid: string;
+  sessions: EvidenceSessionItem[];
+}
+
+export interface DomainEvidenceItem {
+  domain_name: string;
+  domain_uid: string;
+  packages: PackageEvidenceItem[];
+}
+
+export interface EvidenceHistoryResponse {
+  domains: DomainEvidenceItem[];
+}
+
+// === RITM V3 Workflow Types ===
+
+export interface PackageVerifyResult {
+  domain_name: string;
+  domain_uid: string;
+  package_name: string;
+  package_uid: string;
+  success: boolean;
+  errors: string[];
+}
+
+export interface GroupedVerifyResponse {
+  all_passed: boolean;
+  results: PackageVerifyResult[];
+}
+
+export interface TryVerifyRequest {
+  force_continue: boolean;
+  skip_package_uids: string[];
+}
+

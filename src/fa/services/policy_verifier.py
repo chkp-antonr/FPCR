@@ -17,6 +17,16 @@ class VerificationResult:
     warnings: list[str] | None = None
 
 
+@dataclass
+class PackageVerifyInput:
+    """Input for grouped policy verification."""
+
+    domain_name: str
+    domain_uid: str
+    package_name: str
+    package_uid: str
+
+
 class PolicyVerifier:
     """Verify policy integrity via CPAIOPS."""
 
@@ -58,3 +68,23 @@ class PolicyVerifier:
 
         logger.warning(f"Policy verification failed for {package_name}: {errors}")
         return VerificationResult(success=False, errors=errors)
+
+    async def verify_policy_grouped(
+        self, packages: list[PackageVerifyInput]
+    ) -> list[tuple[PackageVerifyInput, VerificationResult]]:
+        """Verify policy for multiple (domain, package) pairs.
+
+        Args:
+            packages: List of packages to verify.
+
+        Returns:
+            List of (input, result) pairs in the same order as inputs.
+        """
+        results: list[tuple[PackageVerifyInput, VerificationResult]] = []
+        for pkg in packages:
+            result = await self.verify_policy(
+                domain_name=pkg.domain_name,
+                package_name=pkg.package_name,
+            )
+            results.append((pkg, result))
+        return results

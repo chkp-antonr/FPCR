@@ -55,7 +55,7 @@ def test_wip_cannot_go_to_completed():
 def test_try_verify_request_rejects_force_continue():
     """force_continue must not be accepted — removed in favour of All-or-No policy."""
     with pytest.raises(ValidationError):
-        TryVerifyRequest(force_continue=True)
+        TryVerifyRequest.model_validate({"force_continue": True})
 
 
 def test_try_verify_request_defaults_valid():

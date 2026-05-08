@@ -996,7 +996,7 @@ async def get_evidence_history(
             domains_map[row.domain_name][row.package_name] = []
             package_uids[(row.domain_name, row.package_name)] = row.package_uid
 
-        sc: dict | None = None
+        sc: dict[str, object] | None = None
         if row.session_changes:
             with suppress(Exception):
                 sc = json.loads(row.session_changes)

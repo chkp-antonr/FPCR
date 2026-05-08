@@ -6,10 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from cpaiops import CPAIOPSClient
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import col, select
 
 from cpcrud.rule_manager import CheckPointRuleManager
 
-from ..models import CreateResult, EvidenceData
+from ..db import engine
+from ..models import CreateResult, EvidenceData, RITMCreatedRule
 from .object_matcher import ObjectMatcher
 from .policy_verifier import PolicyVerifier, VerificationResult
 
@@ -97,6 +100,7 @@ class PackageWorkflowService:
         rule_mgr = CheckPointRuleManager(self.client)
 
         created_rule_uids: list[str] = []
+        updated_rule_uids: list[str] = []
         created_object_uids: list[str] = []
         errors: list[str] = []
 
@@ -133,6 +137,13 @@ class PackageWorkflowService:
                 created_rule_uids=[],
                 created_object_uids=[],
                 errors=errors,
+            )
+
+        # Load existing rule UIDs for update-or-create deduplication
+        existing_uid_queue = await self._find_existing_rule_uids()
+        if existing_uid_queue:
+            self.logger.info(
+                f"[{self.info.package_name}] Found {len(existing_uid_queue)} existing rule(s) to update"
             )
 
         # Process each policy in this package
@@ -177,19 +188,47 @@ class PackageWorkflowService:
 
             position = self._build_position(policy)
 
-            rule_data: dict[str, Any] = {
-                "name": policy.rule_name,
-                "layer": access_layer,
+            # Common payload fields shared by set-access-rule and add-access-rule
+            rule_payload: dict[str, Any] = {
                 "comments": policy.comments,
                 "source": source_names or ["Any"],
                 "destination": dest_names or ["Any"],
                 "service": services if services else ["Any"],
                 "action": policy.action,
                 "track": {"type": policy.track},
-                "position": position,
             }
 
-            # Create rule
+            # Update-or-create: reuse an existing rule from a prior attempt if available
+            existing_uid = existing_uid_queue.pop(0) if existing_uid_queue else None
+            if existing_uid:
+                upd_result = await self.client.api_call(
+                    mgmt_name=self.mgmt_name,
+                    domain=self.info.domain_name,
+                    command="set-access-rule",
+                    payload={
+                        "uid": existing_uid,
+                        "layer": access_layer,
+                        "enabled": True,
+                        **rule_payload,
+                    },
+                )
+                if upd_result.success:
+                    updated_rule_uids.append(existing_uid)
+                    self.logger.info(
+                        f"[{self.info.package_name}] Updated existing rule {existing_uid}"
+                    )
+                    continue
+                self.logger.warning(
+                    f"[{self.info.package_name}] set-access-rule {existing_uid} failed; creating new rule"
+                )
+
+            # Create new rule
+            rule_data: dict[str, Any] = {
+                "name": policy.rule_name,
+                "layer": access_layer,
+                "position": position,
+                **rule_payload,
+            }
             try:
                 result = await rule_mgr.add(
                     mgmt_name=self.mgmt_name,
@@ -216,7 +255,8 @@ class PackageWorkflowService:
 
         self.logger.info(
             f"[{self.info.package_name}] Step: create_objects_and_rules | "
-            f"Created: {len(created_object_uids)} objects, {len(created_rule_uids)} rules"
+            f"Created: {len(created_object_uids)} objects, "
+            f"{len(created_rule_uids)} new rules, {len(updated_rule_uids)} updated rules"
         )
 
         # Get current session UID after changes are made
@@ -224,8 +264,9 @@ class PackageWorkflowService:
 
         return CreateResult(
             objects_created=len(created_object_uids),
-            rules_created=len(created_rule_uids),
+            rules_created=len(created_rule_uids) + len(updated_rule_uids),
             created_rule_uids=created_rule_uids,
+            updated_rule_uids=updated_rule_uids,
             created_object_uids=created_object_uids,
             errors=errors,
         )
@@ -395,6 +436,20 @@ class PackageWorkflowService:
             session_uid=session_uid,
             sid=domain_sid,
         )
+
+    async def _find_existing_rule_uids(self) -> list[str]:
+        """Return rule UIDs previously created for this RITM/domain/package, in creation order."""
+        async with AsyncSession(engine) as db:
+            result = await db.execute(
+                select(RITMCreatedRule.rule_uid)
+                .where(
+                    col(RITMCreatedRule.ritm_number) == self.ritm_number,
+                    col(RITMCreatedRule.domain_uid) == self.info.domain_uid,
+                    col(RITMCreatedRule.package_uid) == self.info.package_uid,
+                )
+                .order_by(col(RITMCreatedRule.id))
+            )
+            return list(result.scalars().all())
 
     def _resolve_access_layer(self, package_data: dict[str, Any]) -> str | None:
         """Resolve access layer from show-package response."""

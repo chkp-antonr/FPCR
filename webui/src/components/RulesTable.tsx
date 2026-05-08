@@ -1,5 +1,5 @@
 import React, { useMemo, useRef } from 'react';
-import { Table, Button, Select, InputNumber, Tag, Space, Spin } from 'antd';
+import { Table, Button, Select, InputNumber, Input, Tag, Space, Spin } from 'antd';
 import { DeleteOutlined, CopyOutlined, CloseOutlined } from '@ant-design/icons';
 import type { ColumnsType, TableProps } from 'antd/es/table';
 import type { DomainInfo, SectionInfo } from '../types';
@@ -549,14 +549,30 @@ const RulesTable: React.FC<RulesTableProps> = ({
       dataIndex: 'comments',
       key: 'comments',
       width: 200,
-      render: (text: string) => text || '-',
+      render: (text: string, record: Rule) => (
+        <Input
+          value={text || ''}
+          onChange={(e) => updateRule({ ...record, comments: e.target.value })}
+          disabled={disabled}
+          placeholder="Comments"
+          size="small"
+        />
+      ),
     },
     {
       title: 'Rule Name',
       dataIndex: 'rule_name',
       key: 'rule_name',
       width: 150,
-      render: (text: string) => text || '-',
+      render: (text: string, record: Rule) => (
+        <Input
+          value={text || ''}
+          onChange={(e) => updateRule({ ...record, rule_name: e.target.value })}
+          disabled={disabled}
+          placeholder="Rule name"
+          size="small"
+        />
+      ),
     },
     {
       title: 'Action',

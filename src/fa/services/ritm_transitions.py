@@ -9,10 +9,10 @@ from fastapi import HTTPException
 from fa.models import RITMStatus
 
 ALLOWED_TRANSITIONS: dict[RITMStatus, set[RITMStatus]] = {
-    RITMStatus.WORK_IN_PROGRESS:   {RITMStatus.READY_FOR_APPROVAL},
+    RITMStatus.WORK_IN_PROGRESS: {RITMStatus.READY_FOR_APPROVAL},
     RITMStatus.READY_FOR_APPROVAL: {RITMStatus.APPROVED, RITMStatus.WORK_IN_PROGRESS},
-    RITMStatus.APPROVED:           {RITMStatus.COMPLETED},
-    RITMStatus.COMPLETED:          set(),
+    RITMStatus.APPROVED: {RITMStatus.COMPLETED},
+    RITMStatus.COMPLETED: set(),
 }
 
 

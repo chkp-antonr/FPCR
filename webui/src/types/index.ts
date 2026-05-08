@@ -13,6 +13,7 @@ export interface AuthResponse {
 export interface UserInfo {
   username: string;
   logged_in_at: string;
+  short_name?: string;
 }
 
 export interface DomainItem {
@@ -393,6 +394,7 @@ export interface PackageVerifyResult {
   package_uid: string;
   success: boolean;
   errors: string[];
+  warnings: string[];
 }
 
 export interface GroupedVerifyResponse {
@@ -401,7 +403,6 @@ export interface GroupedVerifyResponse {
 }
 
 export interface TryVerifyRequest {
-  force_continue: boolean;
   skip_package_uids: string[];
 }
 

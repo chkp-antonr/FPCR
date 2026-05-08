@@ -36,7 +36,7 @@ class RITMWorkflowService:
 
     def __init__(
         self,
-        client: CPAIOPSClient,
+        client: CPAIOPSClient | None,
         ritm_number: str,
         username: str,
     ):
@@ -59,6 +59,7 @@ class RITMWorkflowService:
         Args:
             skip_package_uids: Optional explicit set of package UIDs to skip.
         """
+        assert self.client is not None
         packages = await self._group_by_package()
         if not packages:
             self.logger.warning(f"No packages found for RITM {self.ritm_number}")
@@ -130,9 +131,7 @@ class RITMWorkflowService:
                         errors=verify1.errors,
                     )
                 )
-                self.logger.warning(
-                    f"Pre-check failed for {pkg_info.package_name}; aborting run"
-                )
+                self.logger.warning(f"Pre-check failed for {pkg_info.package_name}; aborting run")
                 return TryVerifyResponse(
                     results=results,
                     evidence_pdf=None,
@@ -195,7 +194,9 @@ class RITMWorkflowService:
                 continue
 
             # ── Success path ────────────────────────────────────────────────
-            await pkg_workflow.disable_rules(create_result.created_rule_uids)
+            await pkg_workflow.disable_rules(
+                create_result.created_rule_uids + create_result.updated_rule_uids
+            )
             await self._record_package_state(
                 attempt,
                 pkg_info,
@@ -245,8 +246,9 @@ class RITMWorkflowService:
         """Run pre-check verify-policy for every (domain, package) pair.
 
         Used by the standalone /verify-policy endpoint so the user can review
-        failures before deciding to force_continue.
+        failures before re-running after SmartConsole fixes.
         """
+        assert self.client is not None
         verifier = PolicyVerifier(self.client)
         inputs = [
             PackageVerifyInput(
@@ -267,6 +269,7 @@ class RITMWorkflowService:
                 package_uid=pkg.package_uid,
                 success=res.success,
                 errors=res.errors,
+                warnings=res.warnings,
             )
             for pkg, res in raw
         ]
@@ -291,21 +294,40 @@ class RITMWorkflowService:
         state: RITMPackageAttemptState,
         error_message: str | None = None,
     ) -> None:
-        """Persist a per-package state transition row in ritm_package_attempt."""
+        """Upsert the per-package state row in ritm_package_attempt.
+
+        The unique constraint allows only one row per (ritm_number, attempt,
+        domain_uid, package_uid).  Multiple calls within the same attempt
+        update the existing row rather than inserting duplicates.
+        """
         async with AsyncSession(engine) as db:
-            db.add(
-                RITMPackageAttempt(
-                    ritm_number=self.ritm_number,
-                    attempt=attempt,
-                    domain_uid=pkg_info.domain_uid,
-                    domain_name=pkg_info.domain_name,
-                    package_uid=pkg_info.package_uid,
-                    package_name=pkg_info.package_name,
-                    state=state,
-                    error_message=error_message,
-                    created_at=datetime.now(UTC),
+            result = await db.execute(
+                select(RITMPackageAttempt).where(
+                    col(RITMPackageAttempt.ritm_number) == self.ritm_number,
+                    col(RITMPackageAttempt.attempt) == attempt,
+                    col(RITMPackageAttempt.domain_uid) == pkg_info.domain_uid,
+                    col(RITMPackageAttempt.package_uid) == pkg_info.package_uid,
                 )
             )
+            row = result.scalar_one_or_none()
+            if row is not None:
+                row.state = state
+                row.error_message = error_message
+                row.created_at = datetime.now(UTC)
+            else:
+                db.add(
+                    RITMPackageAttempt(
+                        ritm_number=self.ritm_number,
+                        attempt=attempt,
+                        domain_uid=pkg_info.domain_uid,
+                        domain_name=pkg_info.domain_name,
+                        package_uid=pkg_info.package_uid,
+                        package_name=pkg_info.package_name,
+                        state=state,
+                        error_message=error_message,
+                        created_at=datetime.now(UTC),
+                    )
+                )
             await db.commit()
 
     async def _store_evidence_session(
@@ -430,6 +452,7 @@ class RITMWorkflowService:
 
     async def _publish_session(self) -> None:
         """Publish changes with session name format: {ritm_number} {username} Created."""
+        assert self.client is not None
         session_name = f"{self.ritm_number} {self.username} Created"
 
         # Get unique domains from packages
@@ -485,6 +508,7 @@ class RITMWorkflowService:
         Returns:
             Dictionary mapping UIDs to names for both cached sections and access layers.
         """
+        assert self.client is not None
         section_uid_to_name: dict[str, str] = {}
 
         async with AsyncSession(engine) as db:

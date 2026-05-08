@@ -27,8 +27,9 @@ _known_tables = {
     "ritm_package_attempt",
     "ritm_edit_snapshot",
 }
-if _known_tables & SQLModel.metadata.tables.keys():
-    SQLModel.metadata.clear()
+_tables_to_clear = _known_tables & SQLModel.metadata.tables.keys()
+for _t in list(_tables_to_clear):
+    SQLModel.metadata.remove(SQLModel.metadata.tables[_t])
 
 
 class RITMStatus(IntEnum):
@@ -71,6 +72,7 @@ class UserInfo(BaseModel):
 
     username: str
     logged_in_at: str
+    short_name: str = "XX"
 
 
 class DomainItem(BaseModel):
@@ -430,6 +432,7 @@ class PackageVerifyResult(BaseModel):
     package_uid: str
     success: bool
     errors: list[str] = []
+    warnings: list[str] = []
 
 
 class GroupedVerifyResponse(BaseModel):
@@ -679,6 +682,7 @@ class CreateResult(BaseModel):
     objects_created: int
     rules_created: int
     created_rule_uids: list[str]
+    updated_rule_uids: list[str] = PydanticField(default_factory=list)
     created_object_uids: list[str]
     errors: list[str] = PydanticField(default_factory=list)
 

@@ -44,7 +44,7 @@ async def test_verify_first_success(mock_client, package_info):
     with patch("fa.services.package_workflow.PolicyVerifier") as mock_verifier_class:
         mock_verifier = AsyncMock()
         mock_verifier.verify_policy = AsyncMock(
-            return_value=VerificationResult(success=True, errors=[], warnings=None)
+            return_value=VerificationResult(success=True, errors=[], warnings=[])
         )
         mock_verifier_class.return_value = mock_verifier
 
@@ -75,7 +75,7 @@ async def test_verify_first_failure(mock_client, package_info):
         mock_verifier = AsyncMock()
         mock_verifier.verify_policy = AsyncMock(
             return_value=VerificationResult(
-                success=False, errors=["Verification failed"], warnings=None
+                success=False, errors=["Verification failed"], warnings=[]
             )
         )
         mock_verifier_class.return_value = mock_verifier
@@ -102,7 +102,7 @@ async def test_verify_again_success(mock_client, package_info):
     with patch("fa.services.package_workflow.PolicyVerifier") as mock_verifier_class:
         mock_verifier = AsyncMock()
         mock_verifier.verify_policy = AsyncMock(
-            return_value=VerificationResult(success=True, errors=[], warnings=None)
+            return_value=VerificationResult(success=True, errors=[], warnings=[])
         )
         mock_verifier_class.return_value = mock_verifier
 

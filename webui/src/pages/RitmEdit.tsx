@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { message, Modal, Button, Spin, Card, Typography, Alert, Space, Steps, Collapse, Checkbox, Tag } from 'antd';
+import { message, Modal, Button, Spin, Card, Typography, Alert, Space, Steps, Collapse, Tag } from 'antd';
 import { ArrowLeftOutlined, PlusOutlined } from '@ant-design/icons';
 import { ritmApi, domainsApi, packagesApi } from '../api/endpoints';
 import { RITM_STATUS, type RuleRow, type IpEntry, type ServiceEntry, type DomainInfo, type TryVerifyResponse, type GroupedVerifyResponse } from '../types';
@@ -54,7 +54,14 @@ export default function RitmEdit() {
   const [planning, setPlanning] = useState(false);
   const [preChecking, setPreChecking] = useState(false);
   const [preCheckResult, setPreCheckResult] = useState<GroupedVerifyResponse | null>(null);
-  const [forceContinue, setForceContinue] = useState(false);
+  const preCheckEsRef = useRef<EventSource | null>(null);
+  const preCheckAccRef = useRef<import('../types').PackageVerifyResult[]>([]);
+
+  // Close any open SSE stream on unmount
+  useEffect(() => () => { preCheckEsRef.current?.close(); }, []);
+  // True until the first rules population from DB has been processed by the auto-save effect.
+  // Prevents the initial load from being treated as a user edit that invalidates verification.
+  const pendingInitialLoad = useRef(true);
   const [verificationErrors, setVerificationErrors] = useState<string[]>([]);
   const [evidenceHtml, setEvidenceHtml] = useState<string | null>(null);
   const [evidenceYaml, setEvidenceYaml] = useState<string | null>(null);
@@ -286,6 +293,14 @@ export default function RitmEdit() {
   // Auto-save policies when rules change (debounced)
   useEffect(() => {
     if (rules.length > 0 && ritm && ritm.status === RITM_STATUS.WORK_IN_PROGRESS) {
+      if (pendingInitialLoad.current) {
+        pendingInitialLoad.current = false;
+      } else if (workflowStep !== 'idle') {
+        setWorkflowStep('idle');
+        setPreCheckResult(null);
+        setTryVerifyResult(null);
+        addWorkflowLog('Rules changed — workflow reset. Re-run Pre-Check before submitting.');
+      }
       const timer = setTimeout(() => {
         savePolicies();
       }, 1000);
@@ -310,7 +325,7 @@ export default function RitmEdit() {
     try {
       const policyItems = rules.map(rule => ({
         ritm_number: ritmNumber || '',
-        comments: rule.comments || `${ritmNumber} #${new Date().toISOString().split('T')[0]}#`,
+        comments: rule.comments || `${ritmNumber} #${new Date().toISOString().split('T')[0]}-${user?.short_name || 'XX'}#`,
         rule_name: rule.rule_name || ritmNumber || '',
         domain_uid: rule.domain?.uid || '',
         domain_name: rule.domain?.name || '',
@@ -357,7 +372,7 @@ export default function RitmEdit() {
       position: { type: 'bottom' },
       action: 'accept',
       track: 'log',
-      comments: `${ritmNumber} #${new Date().toISOString().split('T')[0]}#`,
+      comments: `${ritmNumber} #${new Date().toISOString().split('T')[0]}-${user?.short_name || 'XX'}#`,
       rule_name: ritmNumber || '',
     };
     setRules([...rules, newRule]);
@@ -433,37 +448,78 @@ export default function RitmEdit() {
     console.info(`[workflow ${ts}] ${text}`);
   };
 
-  const handlePreCheck = async () => {
+  const handlePreCheck = () => {
+    // Close any previous stream
+    if (preCheckEsRef.current) {
+      preCheckEsRef.current.close();
+      preCheckEsRef.current = null;
+    }
+
     setPreChecking(true);
     setPreCheckResult(null);
-    setForceContinue(false);
     setVerificationErrors([]);
+    preCheckAccRef.current = [];
     addWorkflowLog('Running pre-check verify-policy...');
-    const hide = message.loading('Pre-check in progress...', 0);
-    try {
-      const result = await ritmApi.verifyPolicyGrouped(ritmNumber || '');
-      setPreCheckResult(result);
-      if (result.all_passed) {
+
+    const es = new EventSource(`/api/v1/ritm/${ritmNumber}/verify-policy/stream`);
+    preCheckEsRef.current = es;
+
+    es.addEventListener('result', (e: MessageEvent) => {
+      const r = JSON.parse(e.data) as import('../types').PackageVerifyResult;
+      preCheckAccRef.current = [...preCheckAccRef.current, r];
+      // Show each result as it arrives; all_passed stays false until done
+      setPreCheckResult({ all_passed: false, results: preCheckAccRef.current });
+
+      const label = `${r.domain_name} / ${r.package_name}`;
+      if (r.success) {
+        addWorkflowLog(`Pre-check passed: ${label}`);
+        r.warnings.forEach(w => addWorkflowLog(`  ↳ WARNING: ${w}`));
+      } else {
+        addWorkflowLog(`Pre-check FAILED: ${label}`);
+        r.errors.forEach(err => addWorkflowLog(`  ↳ ${err}`));
+        r.warnings.forEach(w => addWorkflowLog(`  ↳ WARNING: ${w}`));
+      }
+    });
+
+    es.addEventListener('done', (e: MessageEvent) => {
+      es.close();
+      preCheckEsRef.current = null;
+      const { all_passed } = JSON.parse(e.data) as { all_passed: boolean };
+      const results = preCheckAccRef.current;
+      setPreCheckResult({ all_passed, results });
+      setPreChecking(false);
+
+      if (all_passed) {
         setWorkflowStep('prechecked');
-        addWorkflowLog('Pre-check passed for all packages.');
         message.success({ content: 'All packages passed pre-check.', key: 'wf', duration: 4 });
       } else {
-        const failedNames = result.results.filter(r => !r.success).map(r => `${r.domain_name}/${r.package_name}`);
-        addWorkflowLog(`Pre-check failed for: ${failedNames.join(', ')}`);
-        result.results.filter(r => !r.success).forEach(r =>
-          r.errors.forEach(e => addWorkflowLog(`  ${r.package_name}: ${e}`))
-        );
-        message.warning({ content: 'Some packages failed pre-check. Review before continuing.', key: 'wf', duration: 5 });
+        message.error({ content: 'Pre-check failed — fix errors in SmartConsole and re-run.', key: 'wf', duration: 6 });
       }
-    } catch (error: any) {
-      const msg = extractErrorMsg(error, 'Pre-check failed');
-      setVerificationErrors([msg]);
-      addWorkflowLog(`Pre-check error: ${msg}`);
-      message.error({ content: 'Pre-check failed.', key: 'wf', duration: 5 });
-    } finally {
-      hide();
+    });
+
+    es.addEventListener('error', (e: MessageEvent) => {
+      es.close();
+      preCheckEsRef.current = null;
       setPreChecking(false);
-    }
+      try {
+        const { message: msg } = JSON.parse(e.data) as { message: string };
+        setVerificationErrors([msg]);
+        addWorkflowLog(`Pre-check error: ${msg}`);
+      } catch {
+        addWorkflowLog('Pre-check stream error.');
+      }
+      message.error({ content: 'Pre-check failed.', key: 'wf', duration: 5 });
+    });
+
+    // Network-level failure (server down, auth error, etc.)
+    es.onerror = () => {
+      if (es.readyState === EventSource.CLOSED) {
+        preCheckEsRef.current = null;
+        setPreChecking(false);
+        addWorkflowLog('Pre-check connection closed unexpectedly.');
+        message.error({ content: 'Pre-check connection failed.', key: 'wf', duration: 5 });
+      }
+    };
   };
 
   const handleGeneratePlan = async () => {
@@ -502,17 +558,8 @@ export default function RitmEdit() {
     addWorkflowLog('Try & Verify started...');
     const hide = message.loading('Try & Verify in progress...', 0);
     try {
-      // Compute skip list: packages that failed pre-check and force-continue is NOT checked
-      const skipPackageUids: string[] = [];
-      if (preCheckResult && !preCheckResult.all_passed) {
-        if (!forceContinue) {
-          preCheckResult.results.filter(r => !r.success).forEach(r => skipPackageUids.push(r.package_uid));
-        }
-      }
-
       const response = await ritmApi.tryVerifyWithOptions(ritmNumber || '', {
-        force_continue: forceContinue,
-        skip_package_uids: skipPackageUids,
+        skip_package_uids: [],
       });
       setTryVerifyResult(response);
       setWorkflowStep('verified');
@@ -620,9 +667,11 @@ export default function RitmEdit() {
   };
 
   const handleResetWorkflow = () => {
+    preCheckEsRef.current?.close();
+    preCheckEsRef.current = null;
+    preCheckAccRef.current = [];
     setWorkflowStep('idle');
     setPreCheckResult(null);
-    setForceContinue(false);
     setEvidenceYaml(null);
     setEvidenceChanges(null);
     setShowEvidence(false);
@@ -746,7 +795,7 @@ export default function RitmEdit() {
         position: { type: 'bottom' },
         action: originalRule.action,
         track: originalRule.track,
-        comments: `${ritmNumber} #${new Date().toISOString().split('T')[0]}#`,
+        comments: `${ritmNumber} #${new Date().toISOString().split('T')[0]}-${user?.short_name || 'XX'}#`,
         rule_name: ritmNumber || '',
       };
       setRules([...rules, newRule]);
@@ -1130,67 +1179,70 @@ export default function RitmEdit() {
               />
 
               {workflowStep === 'idle' && (
-                <Space direction="vertical" style={{ width: '100%' }}>
-                  <Button
-                    type="primary"
-                    onClick={handlePreCheck}
-                    disabled={preChecking || saving || rules.length === 0}
-                    loading={preChecking}
-                    block
-                  >
-                    Run Pre-Check (Verify Policy)
-                  </Button>
-                </Space>
+                <Spin spinning={preChecking} tip="Verifying packages…">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Button
+                      type="primary"
+                      onClick={handlePreCheck}
+                      disabled={preChecking || saving || rules.length === 0}
+                      loading={preChecking}
+                      block
+                    >
+                      Run Pre-Check (Verify Policy)
+                    </Button>
+
+                    {/* Streaming per-package results while pre-check is running */}
+                    {preChecking && preCheckResult && preCheckResult.results.length > 0 && (
+                      <Space direction="vertical" style={{ width: '100%', marginTop: 8 }}>
+                        {preCheckResult.results.map(r => (
+                          <div key={r.package_uid} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <Tag color={r.success ? 'green' : 'red'}>{r.success ? 'PASS' : 'FAIL'}</Tag>
+                            <Text style={{ fontSize: '0.9em' }}>{r.domain_name} / {r.package_name}</Text>
+                          </div>
+                        ))}
+                      </Space>
+                    )}
+                  </Space>
+                </Spin>
               )}
 
               {/* Pre-check results — shown on 'idle' when we have results and not all passed */}
-              {workflowStep === 'idle' && preCheckResult && !preCheckResult.all_passed && (
+              {workflowStep === 'idle' && !preChecking && preCheckResult && !preCheckResult.all_passed && (
                 <Space direction="vertical" style={{ width: '100%', marginTop: 12 }}>
                   <Alert
-                    type="warning"
+                    type="error"
                     message="Some packages failed pre-check verification"
+                    description={(() => {
+                      const failed = preCheckResult.results.filter(r => !r.success);
+                      const names = failed.map(r => `${r.domain_name} / ${r.package_name}`).join(', ');
+                      return `Fix errors in SmartConsole for: ${names}. Then re-run Pre-Check.`;
+                    })()}
                     showIcon
                   />
                   {preCheckResult.results.map(r => (
-                    <div key={r.package_uid} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <Tag color={r.success ? 'green' : 'red'}>{r.success ? 'PASS' : 'FAIL'}</Tag>
-                      <Text style={{ fontSize: '0.9em' }}>{r.domain_name} / {r.package_name}</Text>
-                      {!r.success && r.errors.length > 0 && (
-                        <Text type="danger" style={{ fontSize: '0.85em' }}>— {r.errors[0]}</Text>
-                      )}
+                    <div key={r.package_uid} style={{ marginTop: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Tag color={r.success ? 'green' : 'red'}>{r.success ? 'PASS' : 'FAIL'}</Tag>
+                        <Text strong style={{ fontSize: '0.9em' }}>{r.domain_name} / {r.package_name}</Text>
+                      </div>
+                      {r.errors.map((e, i) => (
+                        <div key={i} style={{ marginLeft: 40, marginTop: 2 }}>
+                          <Text type="danger" style={{ fontSize: '0.85em' }}>• {e}</Text>
+                        </div>
+                      ))}
+                      {r.warnings.map((w, i) => (
+                        <div key={i} style={{ marginLeft: 40, marginTop: 2 }}>
+                          <Text type="warning" style={{ fontSize: '0.85em' }}>⚠ {w}</Text>
+                        </div>
+                      ))}
                     </div>
                   ))}
-                  <Checkbox
-                    checked={forceContinue}
-                    onChange={e => setForceContinue(e.target.checked)}
-                  >
-                    Force Continue — skip failed packages and proceed with passing ones
-                  </Checkbox>
-                  {forceContinue && (
-                    <Button
-                      type="primary"
-                      onClick={() => setWorkflowStep('prechecked')}
-                      block
-                    >
-                      Continue to Plan
-                    </Button>
-                  )}
                 </Space>
               )}
 
               {workflowStep === 'prechecked' && (
                 <Space direction="vertical" style={{ width: '100%' }}>
-                  {preCheckResult && preCheckResult.all_passed ? (
-                    <Alert type="success" message="All packages passed pre-check." showIcon />
-                  ) : (
-                    preCheckResult && (
-                      <Alert
-                        type="warning"
-                        message={`${preCheckResult.results.filter(r => !r.success).length} package(s) will be skipped (Force Continue enabled)`}
-                        showIcon
-                      />
-                    )
-                  )}
+                  <Alert type="success" message="All packages passed pre-check." showIcon />
                   <Button
                     type="primary"
                     onClick={handleGeneratePlan}
@@ -1209,9 +1261,6 @@ export default function RitmEdit() {
                   <Text type="secondary">
                     Review the planned changes above, then run Try & Verify.
                   </Text>
-                  {forceContinue && (
-                    <Alert type="warning" message="Force Continue is active — failed pre-check packages will be skipped." showIcon />
-                  )}
                   <Space>
                     <Button
                       type="primary"
@@ -1464,14 +1513,85 @@ function SessionChangesDisplay({ sessionChanges }: { sessionChanges: any }) {
                 return changes.map((change: any, changeIdx: number) => {
                   const operations = change.operations || {};
                   const addedObjects = operations['added-objects'] || [];
-                  const modifiedObjects = operations['modified-objects'] || [];
+                  const rawModified: any[] = operations['modified-objects'] || [];
                   const deletedObjects = operations['deleted-objects'] || [];
 
-                  // Separate rules from objects
-                  const rules = addedObjects.filter((obj: any) => obj.type === 'access-rule');
+                  // modified-objects entries are {new-object, old-object} wrappers — unwrap
+                  const modifiedNewObjects: any[] = rawModified
+                    .map((m: any) => m['new-object'] ?? (m.type ? m : null))
+                    .filter(Boolean);
+
+                  // Annotate modified rules with source/dest diff vs old-object
+                  const annotateRule = (newObj: any, oldObj: any): any => {
+                    const oldSrcUids = new Set<string>(
+                      (oldObj?.source || []).map((r: any) => r.uid).filter(Boolean)
+                    );
+                    const oldDstUids = new Set<string>(
+                      (oldObj?.destination || []).map((r: any) => r.uid).filter(Boolean)
+                    );
+                    const newSrcUids = new Set<string>(
+                      (newObj.source || []).map((r: any) => r.uid).filter(Boolean)
+                    );
+                    const newDstUids = new Set<string>(
+                      (newObj.destination || []).map((r: any) => r.uid).filter(Boolean)
+                    );
+                    const hasSrcHistory = oldSrcUids.size > 0;
+                    const hasDstHistory = oldDstUids.size > 0;
+                    return {
+                      ...newObj,
+                      source: [
+                        ...(newObj.source || []).map((r: any) => ({
+                          ...r,
+                          _change: hasSrcHistory ? (oldSrcUids.has(r.uid) ? 'same' : 'added') : 'same',
+                        })),
+                        ...(oldObj?.source || [])
+                          .filter((r: any) => r.uid && !newSrcUids.has(r.uid))
+                          .map((r: any) => ({ ...r, _change: 'removed' })),
+                      ],
+                      destination: [
+                        ...(newObj.destination || []).map((r: any) => ({
+                          ...r,
+                          _change: hasDstHistory ? (oldDstUids.has(r.uid) ? 'same' : 'added') : 'same',
+                        })),
+                        ...(oldObj?.destination || [])
+                          .filter((r: any) => r.uid && !newDstUids.has(r.uid))
+                          .map((r: any) => ({ ...r, _change: 'removed' })),
+                      ],
+                    };
+                  };
+
+                  // Separate rules from non-rule objects across both added and modified
+                  const addedRules = addedObjects.filter((obj: any) => obj.type === 'access-rule');
+                  const modifiedRules = rawModified
+                    .map((m: any) => {
+                      const newObj = m['new-object'] ?? (m.type ? m : null);
+                      const oldObj = m['old-object'];
+                      return newObj ? annotateRule(newObj, oldObj) : null;
+                    })
+                    .filter((obj: any) => obj?.type === 'access-rule');
+                  const rules = [...addedRules, ...modifiedRules];
+                  const addedNonRules = addedObjects.filter((obj: any) => obj.type !== 'access-rule');
+                  const modifiedNonRules = modifiedNewObjects.filter((obj: any) => obj.type !== 'access-rule');
+
+                  const addedHostUids = new Set<string>(
+                    addedNonRules.filter((obj: any) => obj.type === 'host').map((obj: any) => obj.uid as string)
+                  );
+                  const existingObjects: any[] = [];
+                  const seenExistingUids = new Set<string>();
+                  rules.forEach((rule: any) => {
+                    ['source', 'destination'].forEach((field) => {
+                      (rule[field] || []).forEach((ref: any) => {
+                        if (ref.type === 'host' && ref.uid && !addedHostUids.has(ref.uid) && !seenExistingUids.has(ref.uid)) {
+                          seenExistingUids.add(ref.uid);
+                          existingObjects.push(ref);
+                        }
+                      });
+                    });
+                  });
                   const objects = {
-                    added: addedObjects.filter((obj: any) => obj.type !== 'access-rule'),
-                    modified: modifiedObjects,
+                    added: addedNonRules,
+                    existing: existingObjects,
+                    modified: modifiedNonRules,
                     deleted: deletedObjects,
                   };
 
@@ -1528,14 +1648,30 @@ function SessionChangesDisplay({ sessionChanges }: { sessionChanges: any }) {
                     rulesByPackage.get(pkg)!.push(rule);
                   });
 
-                  const renderRefList = (items: any[] | undefined): string => {
+                  const renderRefList = (items: any[] | undefined) => {
                     if (!Array.isArray(items) || items.length === 0) return '-';
-                    const rendered = items.map((item: any) => {
-                      if (typeof item === 'string') return item;
-                      if (item && typeof item === 'object') return item.name || item.uid || '';
-                      return '';
-                    }).filter(Boolean);
-                    return rendered.length > 0 ? rendered.join(', ') : '-';
+                    const labeled: Array<{ name: string; change?: string }> = [];
+                    items.forEach((item: any) => {
+                      const name = typeof item === 'string' ? item : (item?.name || item?.uid || '');
+                      if (name) labeled.push({ name, change: item?._change });
+                    });
+                    if (labeled.length === 0) return '-';
+                    const hasDiff = labeled.some(e => e.change === 'added' || e.change === 'removed');
+                    if (!hasDiff) return labeled.map(e => e.name).join(', ');
+                    return (
+                      <>
+                        {labeled.map((entry, i) => {
+                          const sep = i < labeled.length - 1 ? ', ' : '';
+                          if (entry.change === 'added') {
+                            return <span key={i}><span style={{ color: '#389e0d', fontWeight: 600 }}>+{entry.name}</span>{sep}</span>;
+                          }
+                          if (entry.change === 'removed') {
+                            return <span key={i}><span style={{ color: '#cf1322', textDecoration: 'line-through' }}>−{entry.name}</span>{sep}</span>;
+                          }
+                          return <span key={i}>{entry.name}{sep}</span>;
+                        })}
+                      </>
+                    );
                   };
 
                   return (
@@ -1647,12 +1783,13 @@ function SessionChangesDisplay({ sessionChanges }: { sessionChanges: any }) {
                       )}
 
                       {/* Objects Summary */}
-                      {(objects.added.length > 0 || objects.modified.length > 0 || objects.deleted.length > 0) && (
+                      {(objects.added.length > 0 || objects.existing.length > 0 || objects.modified.length > 0 || objects.deleted.length > 0) && (
                         <div style={{ marginBottom: 12 }}>
                           <Text strong>Objects Summary</Text>
-                          {['added', 'modified', 'deleted'].map((category) => {
-                            const catObjects = objects[category as keyof typeof objects];
+                          {(['added', 'existing', 'modified', 'deleted'] as const).map((category) => {
+                            const catObjects = objects[category];
                             if (!catObjects || catObjects.length === 0) return null;
+                            const isNew = category === 'added';
 
                             // Group by type
                             const byType: Record<string, any[]> = {};
@@ -1664,16 +1801,19 @@ function SessionChangesDisplay({ sessionChanges }: { sessionChanges: any }) {
 
                             return (
                               <div key={category} style={{ marginLeft: 12, marginTop: 4 }}>
-                                <Text>{category.charAt(0).toUpperCase() + category.slice(1)}:</Text>
+                                <Text>{category === 'existing' ? 'Existing' : category.charAt(0).toUpperCase() + category.slice(1)}:</Text>
                                 {Object.entries(byType).map(([type, objs]) => (
                                   <div key={type} style={{ marginLeft: 12 }}>
                                     <Text style={{ fontSize: '0.9em' }}>
                                       {type}:{' '}
-                                      {objs.map((obj: any) => {
+                                      {objs.map((obj: any, i: number) => {
                                         const ip = obj['ipv4-address'] || obj.subnet4 || '';
                                         const mask = obj['mask-length4'] || '';
-                                        return `${obj.name}${ip ? ` (${ip}${mask ? '/' + mask : ''})` : ''}`;
-                                      }).join(', ')}
+                                        const label = `${obj.name}${ip ? ` (${ip}${mask ? '/' + mask : ''})` : ''}`;
+                                        return isNew
+                                          ? <span key={i} style={{ background: '#fffacd', fontWeight: 600, padding: '0 3px', borderRadius: 2, marginRight: i < objs.length - 1 ? 4 : 0 }}>{label}</span>
+                                          : <span key={i} style={{ marginRight: i < objs.length - 1 ? 4 : 0 }}>{label}{i < objs.length - 1 ? ',' : ''}</span>;
+                                      })}
                                     </Text>
                                   </div>
                                 ))}

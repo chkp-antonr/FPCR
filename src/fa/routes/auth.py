@@ -7,12 +7,23 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from ..cache_service import cache_service
+from ..config import settings
 from ..models import AuthResponse, LoginRequest, UserInfo
 from ..radius import validate_credentials
+from ..services.initials_loader import InitialsLoader
 from ..session import SessionData, session_manager
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
+
+_initials_loader: InitialsLoader | None = None
+
+
+def _get_initials_loader() -> InitialsLoader:
+    global _initials_loader
+    if _initials_loader is None:
+        _initials_loader = InitialsLoader(settings.initials_csv_path)
+    return _initials_loader
 
 
 def _log_background_refresh_result(task: asyncio.Task[None]) -> None:
@@ -94,4 +105,9 @@ async def get_me(
     if not session:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    return UserInfo(username=session.username, logged_in_at=session.created_at.isoformat())
+    short_name = _get_initials_loader().get_initials(session.username)
+    return UserInfo(
+        username=session.username,
+        logged_in_at=session.created_at.isoformat(),
+        short_name=short_name,
+    )

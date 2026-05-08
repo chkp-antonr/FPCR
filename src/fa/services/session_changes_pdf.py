@@ -1,5 +1,6 @@
 """Generate PDF evidence from session changes data using ReportLab."""
 
+import html
 import json
 from datetime import datetime
 from typing import Any
@@ -506,12 +507,30 @@ class SessionChangesPDFGenerator:
         def _section_row(name: str) -> list[Any]:
             return [Paragraph(f"\u25bc  {name}", section_style)] + [""] * (num_cols - 1)
 
+        def _render_ref_items(items: list[dict[str, str]]) -> str:
+            """Build ReportLab XML markup for diff-annotated source/dest items."""
+            parts = []
+            for item in items:
+                name = item["name"]  # already html-escaped by _build_ref_items
+                change = item.get("change", "same")
+                if change == "added":
+                    parts.append(f'<font color="#389e0d"><b>+{name}</b></font>')
+                elif change == "removed":
+                    parts.append(f'<font color="#cf1322"><strike>-{name}</strike></font>')
+                else:
+                    parts.append(name)
+            return ", ".join(parts)
+
         def _data_row(rule: dict[str, Any]) -> list[Any]:
+            src_items = rule.get("source_items")
+            dst_items = rule.get("dest_items")
+            src_text = _render_ref_items(src_items) if src_items else ", ".join(rule.get("source", []))
+            dst_text = _render_ref_items(dst_items) if dst_items else ", ".join(rule.get("destination", []))
             return [
                 Paragraph(str(rule.get("rule_number", "") or ""), cell_style),
                 Paragraph(rule.get("name", ""), cell_style),
-                Paragraph(", ".join(rule.get("source", [])), cell_style),
-                Paragraph(", ".join(rule.get("destination", [])), cell_style),
+                Paragraph(src_text, cell_style),
+                Paragraph(dst_text, cell_style),
                 Paragraph(", ".join(rule.get("service", [])), cell_style),
                 Paragraph(rule.get("action", ""), cell_style),
                 Paragraph(rule.get("track", "") or "Log", cell_style),
@@ -625,7 +644,7 @@ class SessionChangesPDFGenerator:
         """
         story.append(Paragraph("Objects Summary", self.styles["SectionHeader"]))
 
-        for category in ["added", "modified", "deleted"]:
+        for category in ["added", "existing", "modified", "deleted"]:
             category_objects = objects.get(category, {})
             has_any = any(cat_list for cat_list in category_objects.values())
 
@@ -712,6 +731,13 @@ class SessionChangesPDFGenerator:
                         # Group objects by type
                         objects_by_type: dict[str, dict[str, list[Any]]] = {
                             "added": {
+                                "hosts": [],
+                                "networks": [],
+                                "ranges": [],
+                                "groups": [],
+                                "other": [],
+                            },
+                            "existing": {
                                 "hosts": [],
                                 "networks": [],
                                 "ranges": [],
@@ -875,6 +901,7 @@ class SessionChangesPDFGenerator:
 
                                     if obj_type == "host":
                                         obj_info["ip"] = obj.get("ipv4-address", "")
+                                        obj_info["is_new"] = bucket == "added"
                                         objects_by_type[bucket]["hosts"].append(obj_info)
                                     elif obj_type == "network":
                                         obj_info["subnet"] = obj.get("subnet4", "")
@@ -890,10 +917,141 @@ class SessionChangesPDFGenerator:
                                     else:
                                         objects_by_type[bucket]["other"].append(obj_info)
 
-                        # Process all object categories
+                        def _build_ref_items(
+                            new_refs: list[dict[str, Any]],
+                            old_refs: list[dict[str, Any]] | None,
+                        ) -> list[dict[str, str]]:
+                            """Build annotated {name, change} list for source/dest diff."""
+                            if not old_refs:
+                                return [
+                                    {
+                                        "name": html.escape(r.get("name") or r.get("uid", "")),
+                                        "change": "same",
+                                    }
+                                    for r in new_refs
+                                    if r.get("name") or r.get("uid")
+                                ]
+                            old_uids: set[str] = {r.get("uid", "") for r in old_refs if r.get("uid")}
+                            new_uids: set[str] = {r.get("uid", "") for r in new_refs if r.get("uid")}
+                            items: list[dict[str, str]] = []
+                            for r in new_refs:
+                                name = html.escape(r.get("name") or r.get("uid", ""))
+                                if not name:
+                                    continue
+                                uid = r.get("uid", "")
+                                change = "same" if (uid and uid in old_uids) else "added"
+                                items.append({"name": name, "change": change})
+                            for r in old_refs:
+                                uid = r.get("uid", "")
+                                name = html.escape(r.get("name") or r.get("uid", ""))
+                                if not name or not uid:
+                                    continue
+                                if uid not in new_uids:
+                                    items.append({"name": name, "change": "removed"})
+                            return items
+
+                        # Process added and deleted objects (rules and non-rules)
                         process_objects(added_objects, "added")
-                        process_objects(modified_objects, "modified")
                         process_objects(deleted_objects, "deleted")
+
+                        # Process modified-objects: non-rules via process_objects,
+                        # access-rules get diff-annotated source_items/dest_items
+                        modified_non_rules: list[dict[str, Any]] = []
+                        modified_rule_scan_refs: list[dict[str, Any]] = []
+                        for entry in modified_objects:
+                            new_obj = entry.get("new-object") if isinstance(entry.get("new-object"), dict) else None
+                            old_obj = entry.get("old-object") if isinstance(entry.get("old-object"), dict) else None
+                            if new_obj is None:
+                                if isinstance(entry, dict) and entry.get("type") != "access-rule":
+                                    modified_non_rules.append(entry)
+                                continue
+                            if new_obj.get("type") == "access-rule":
+                                install_on = new_obj.get("install-on") or new_obj.get("install_on") or []
+                                mod_targets: list[str] = []
+                                if isinstance(install_on, list):
+                                    for target in install_on:
+                                        if isinstance(target, dict):
+                                            t_name = target.get("name") or target.get("uid", "")
+                                            if t_name:
+                                                mod_targets.append(str(t_name))
+                                        elif target:
+                                            mod_targets.append(str(target))
+                                old_src = old_obj.get("source", []) if old_obj else None
+                                old_dst = old_obj.get("destination", []) if old_obj else None
+                                mod_rule: dict[str, Any] = {
+                                    "rule_number": (
+                                        new_obj.get("rule-number")
+                                        or new_obj.get("rule_number")
+                                        or new_obj.get("position", "")
+                                    ),
+                                    "name": new_obj.get("name", ""),
+                                    "comments": new_obj.get("comments", ""),
+                                    "source": [
+                                        s.get("name", s.get("uid", ""))
+                                        for s in new_obj.get("source", [])
+                                    ],
+                                    "source_items": _build_ref_items(
+                                        new_obj.get("source", []), old_src
+                                    ),
+                                    "destination": [
+                                        d.get("name", d.get("uid", ""))
+                                        for d in new_obj.get("destination", [])
+                                    ],
+                                    "dest_items": _build_ref_items(
+                                        new_obj.get("destination", []), old_dst
+                                    ),
+                                    "service": [
+                                        s.get("name", s.get("uid", ""))
+                                        for s in new_obj.get("service", [])
+                                    ],
+                                    "action": new_obj.get("action", {}).get("name", ""),
+                                    "track": new_obj.get("track", {})
+                                    .get("type", {})
+                                    .get("name", ""),
+                                    "targets": mod_targets,
+                                    "layer": resolve_section_name(new_obj),
+                                    "package": resolve_package_name(new_obj),
+                                }
+                                logger.debug(
+                                    f"[TROUBLESHOOT] Modified rule resolved: layer={mod_rule['layer']}, package={mod_rule['package']}"
+                                )
+                                rules.append(mod_rule)
+                                modified_rule_scan_refs.append(new_obj)
+                                if old_obj:
+                                    modified_rule_scan_refs.append(old_obj)
+                            else:
+                                modified_non_rules.append(new_obj)
+
+                        process_objects(modified_non_rules, "modified")
+
+                        # Collect pre-existing hosts referenced in rules (added or modified)
+                        added_host_uids: set[str] = {
+                            obj.get("uid", "")
+                            for obj in added_objects
+                            if obj.get("type") == "host" and obj.get("uid")
+                        }
+                        seen_existing_uids: set[str] = set()
+                        for obj in added_objects + modified_rule_scan_refs:
+                            if obj.get("type") == "access-rule":
+                                for field in ("source", "destination"):
+                                    for ref in obj.get(field, []):
+                                        if ref.get("type") == "host":
+                                            uid = ref.get("uid", "")
+                                            if (
+                                                uid
+                                                and uid not in added_host_uids
+                                                and uid not in seen_existing_uids
+                                            ):
+                                                seen_existing_uids.add(uid)
+                                                objects_by_type["existing"]["hosts"].append(
+                                                    {
+                                                        "name": ref.get("name", ""),
+                                                        "uid": uid,
+                                                        "type": "host",
+                                                        "ip": ref.get("ipv4-address", ""),
+                                                        "is_new": False,
+                                                    }
+                                                )
 
                         # Build domain structure
                         domain_entry = {

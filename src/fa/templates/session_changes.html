@@ -101,6 +101,12 @@
             font-weight: bold;
             color: #495057;
         }
+        .new-object {
+            background: #fffacd;
+            font-weight: bold;
+            padding: 1px 4px;
+            border-radius: 2px;
+        }
         .session-info {
             margin: 10px 0;
             padding: 8px 12px;
@@ -189,16 +195,27 @@
     {% endfor %}
     {% endif %}
 
-    {% if domain.objects.added.hosts or domain.objects.added.networks or domain.objects.added.ranges or domain.objects.added.groups %}
+    {% if domain.objects.added.hosts or domain.objects.added.networks or domain.objects.added.ranges or domain.objects.added.groups or domain.objects.existing.hosts %}
     <div class="objects-summary">
         <h3>Objects Summary</h3>
 
         {% if domain.objects.added.hosts %}
         <div class="object-category">
-            <div class="object-category-title">Added Hosts</div>
+            <div class="object-category-title">Added:</div>
             <ul>
                 {% for host in domain.objects.added.hosts %}
-                <li>{{ host.name }} ({{ host.ip }})</li>
+                <li><span class="new-object">host: {{ host.name }} ({{ host.ip }})</span></li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {% if domain.objects.existing.hosts %}
+        <div class="object-category">
+            <div class="object-category-title">Existing:</div>
+            <ul>
+                {% for host in domain.objects.existing.hosts %}
+                <li>host: {{ host.name }} ({{ host.ip }})</li>
                 {% endfor %}
             </ul>
         </div>
@@ -209,7 +226,7 @@
             <div class="object-category-title">Added Networks</div>
             <ul>
                 {% for net in domain.objects.added.networks %}
-                <li>{{ net.name }} ({{ net.subnet }}/{{ net.mask }})</li>
+                <li><span class="new-object">{{ net.name }} ({{ net.subnet }}/{{ net.mask }})</span></li>
                 {% endfor %}
             </ul>
         </div>
@@ -220,7 +237,7 @@
             <div class="object-category-title">Added Address Ranges</div>
             <ul>
                 {% for rng in domain.objects.added.ranges %}
-                <li>{{ rng.name }} ({{ rng.first }} - {{ rng.last }})</li>
+                <li><span class="new-object">{{ rng.name }} ({{ rng.first }} - {{ rng.last }})</span></li>
                 {% endfor %}
             </ul>
         </div>
@@ -231,7 +248,7 @@
             <div class="object-category-title">Added Groups</div>
             <ul>
                 {% for grp in domain.objects.added.groups %}
-                <li>{{ grp.name }} ({{ grp.members | length }} members)</li>
+                <li><span class="new-object">{{ grp.name }} ({{ grp.members | length }} members)</span></li>
                 {% endfor %}
             </ul>
         </div>

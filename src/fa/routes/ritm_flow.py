@@ -1,8 +1,9 @@
 """RITM Create & Verify flow endpoints."""
 
+import asyncio
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 from arlogi import get_logger
 from cpaiops import CPAIOPSClient
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
@@ -28,6 +29,7 @@ from ..models import (
     MatchObjectsResponse,
     MatchResult,
     PackageEvidenceItem,
+    PackageVerifyResult,
     PlanYamlResponse,
     Policy,
     PublishResponse,
@@ -43,7 +45,8 @@ from ..models import (
 from ..services.evidence_generator import EvidenceGenerator
 from ..services.initials_loader import InitialsLoader
 from ..services.object_matcher import ObjectMatcher
-from ..services.policy_verifier import PolicyVerifier
+from ..services.package_workflow import PackageInfo
+from ..services.policy_verifier import PolicyVerifier, VerificationResult
 from ..services.ritm_workflow_service import RITMWorkflowService
 from ..services.session_changes_pdf import SessionChangesPDFGenerator
 from ..services.snapshot_service import SnapshotService
@@ -434,6 +437,101 @@ async def verify_policy_pre_check(
     except Exception as e:
         logger.error(f"Error in verify_policy for RITM {ritm_number}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get("/ritm/{ritm_number}/verify-policy/stream")
+async def stream_verify_policy(
+    ritm_number: str,
+    session: SessionData = Depends(get_session_data),
+) -> StreamingResponse:
+    """Stream per-package verify-policy results as they complete (SSE).
+
+    Each 'result' event carries a PackageVerifyResult JSON.
+    Final 'done' event carries {"all_passed": bool}.
+    """
+    if not session:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    async with AsyncSession(engine) as db:
+        ritm_row = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        if not ritm_row.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="RITM not found")
+
+    async def generate() -> AsyncIterator[str]:  # noqa: C901
+        try:
+            async with CPAIOPSClient(
+                engine=engine,
+                username=session.username,
+                password=session.password,
+                mgmt_ip=settings.api_mgmt,
+            ) as client:
+                workflow = RITMWorkflowService(
+                    client=client,
+                    ritm_number=ritm_number,
+                    username=session.username,
+                )
+                packages = await workflow._group_by_package()
+
+                if not packages:
+                    yield f"event: done\ndata: {json.dumps({'all_passed': True})}\n\n"
+                    return
+
+                verifier = PolicyVerifier(client)
+                # Check Point MDS rejects parallel domain logins from the same credentials.
+                # Semaphore(1) serializes domain sessions while still streaming results
+                # to the frontend as each one completes.
+                login_sem = asyncio.Semaphore(1)
+                queue: asyncio.Queue[tuple[PackageInfo, object, Exception | None]] = asyncio.Queue()
+
+                async def verify_one(pkg: PackageInfo) -> None:
+                    try:
+                        async with login_sem:
+                            res = await verifier.verify_policy(pkg.domain_name, pkg.package_name)
+                        await queue.put((pkg, res, None))
+                    except Exception as exc:
+                        await queue.put((pkg, None, exc))
+
+                tasks = [asyncio.create_task(verify_one(pkg)) for pkg in packages]
+                all_results: list[PackageVerifyResult] = []
+
+                for _ in packages:
+                    pkg, res, exc = await queue.get()
+                    if exc is not None:
+                        item = PackageVerifyResult(
+                            domain_name=pkg.domain_name,
+                            domain_uid=pkg.domain_uid,
+                            package_name=pkg.package_name,
+                            package_uid=pkg.package_uid,
+                            success=False,
+                            errors=[str(exc)],
+                        )
+                    else:
+                        assert isinstance(res, VerificationResult)
+                        item = PackageVerifyResult(
+                            domain_name=pkg.domain_name,
+                            domain_uid=pkg.domain_uid,
+                            package_name=pkg.package_name,
+                            package_uid=pkg.package_uid,
+                            success=res.success,
+                            errors=res.errors,
+                            warnings=res.warnings,
+                        )
+                    all_results.append(item)
+                    yield f"event: result\ndata: {item.model_dump_json()}\n\n"
+
+                await asyncio.gather(*tasks, return_exceptions=True)
+                all_passed = all(r.success for r in all_results)
+                yield f"event: done\ndata: {json.dumps({'all_passed': all_passed})}\n\n"
+
+        except Exception as exc:
+            logger.error(f"SSE stream error for RITM {ritm_number}: {exc}", exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/ritm/{ritm_number}/try-verify")

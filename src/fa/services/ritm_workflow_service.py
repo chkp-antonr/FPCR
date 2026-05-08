@@ -49,17 +49,15 @@ class RITMWorkflowService:
 
     async def try_verify(
         self,
-        force_continue: bool = False,
         skip_package_uids: set[str] | None = None,
     ) -> TryVerifyResponse:
-        """Execute full Try & Verify workflow.
+        """Execute full Try & Verify workflow (All-or-No policy).
+
+        Any pre-check failure aborts the entire run — no partial execution.
+        Use POST /pre-verify first to surface verification errors before calling this.
 
         Args:
-            force_continue: When True, packages that fail pre-check are recorded
-                as PRECHECK_FAILED_SKIPPED and workflow continues for the rest.
-                When False (default), any pre-check failure aborts the whole run.
-            skip_package_uids: Optional explicit set of package UIDs to skip
-                (e.g. pre-populated from a prior /verify-policy call).
+            skip_package_uids: Optional explicit set of package UIDs to skip.
         """
         packages = await self._group_by_package()
         if not packages:
@@ -74,8 +72,7 @@ class RITMWorkflowService:
 
         self.logger.info(
             f"Try & Verify for RITM {self.ritm_number}: "
-            f"Processing {len(packages)} unique package(s) "
-            f"(force_continue={force_continue})"
+            f"Processing {len(packages)} unique package(s)"
         )
 
         # Compute attempt number ONCE – shared across all packages in this run
@@ -133,20 +130,16 @@ class RITMWorkflowService:
                         errors=verify1.errors,
                     )
                 )
-                if not force_continue:
-                    # Abort the whole run – caller must retry with force_continue=True
-                    self.logger.warning(
-                        f"Pre-check failed for {pkg_info.package_name}; "
-                        "aborting (force_continue=False)"
-                    )
-                    return TryVerifyResponse(
-                        results=results,
-                        evidence_pdf=None,
-                        evidence_html=None,
-                        published=False,
-                        session_changes=None,
-                    )
-                continue
+                self.logger.warning(
+                    f"Pre-check failed for {pkg_info.package_name}; aborting run"
+                )
+                return TryVerifyResponse(
+                    results=results,
+                    evidence_pdf=None,
+                    evidence_html=None,
+                    published=False,
+                    session_changes=None,
+                )
 
             await self._record_package_state(
                 attempt, pkg_info, RITMPackageAttemptState.PRECHECK_PASSED

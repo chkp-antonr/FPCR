@@ -2,8 +2,9 @@
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
-from fa.models import RITMStatus
+from fa.models import RITMStatus, TryVerifyRequest
 from fa.services.ritm_transitions import ALLOWED_TRANSITIONS, assert_transition
 
 WIP = RITMStatus.WORK_IN_PROGRESS
@@ -49,3 +50,14 @@ def test_approved_cannot_go_to_wip():
 def test_wip_cannot_go_to_completed():
     with pytest.raises(HTTPException):
         assert_transition(WIP, COM)
+
+
+def test_try_verify_request_rejects_force_continue():
+    """force_continue must not be accepted — removed in favour of All-or-No policy."""
+    with pytest.raises(ValidationError):
+        TryVerifyRequest(force_continue=True)
+
+
+def test_try_verify_request_defaults_valid():
+    req = TryVerifyRequest()
+    assert req.skip_package_uids == []

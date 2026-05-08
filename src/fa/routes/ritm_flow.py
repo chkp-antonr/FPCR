@@ -445,7 +445,7 @@ async def try_verify_ritm(
     """Execute Try & Verify workflow with automatic rollback and disable.
 
     Workflow for each package:
-    1. Verify policy (pre-check) – if failed and force_continue=False, abort.
+    1. Verify policy (pre-check) – if failed, abort entire run (All-or-No policy).
     2. Create objects and rules.
     3. Verify policy again (post-creation).
     4. On verify failure: delete rules, re-verify, discard session if still failing.
@@ -473,7 +473,6 @@ async def try_verify_ritm(
                 username=session.username,
             )
             result = await workflow.try_verify(
-                force_continue=body.force_continue,
                 skip_package_uids=set(body.skip_package_uids),
             )
             return result

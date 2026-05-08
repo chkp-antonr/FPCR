@@ -442,8 +442,8 @@ class GroupedVerifyResponse(BaseModel):
 class TryVerifyRequest(BaseModel):
     """Request body for the try-verify endpoint."""
 
-    force_continue: bool = False
     skip_package_uids: list[str] = []
+    model_config = {"extra": "forbid"}
 
 
 class ReviewerItem(BaseModel):

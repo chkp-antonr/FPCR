@@ -358,6 +358,47 @@ async def plan_yaml(
     return PlanYamlResponse(yaml=yaml, changes=changes)
 
 
+@router.post("/ritm/{ritm_number}/pre-verify")
+async def pre_verify(
+    ritm_number: str,
+    session: SessionData = Depends(get_session_data),
+) -> GroupedVerifyResponse:
+    """Workflow step 1: verify all affected policy packages before creating anything.
+
+    Runs verify-policy against every unique (domain, package) from saved policies.
+    Returns grouped results (domain → packages → errors).
+    HTTP 200 regardless of pass/fail — check `all_passed` in the response body.
+    Returns HTTP 400 if no policies are saved for this RITM.
+    """
+    async with AsyncSession(engine) as db:
+        ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
+        if not ritm_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="RITM not found")
+
+    try:
+        async with CPAIOPSClient(
+            engine=engine,
+            username=session.username,
+            password=session.password,
+            mgmt_ip=settings.api_mgmt,
+        ) as client:
+            workflow = RITMWorkflowService(
+                client=client,
+                ritm_number=ritm_number,
+                username=session.username,
+            )
+            packages = await workflow._group_by_package()
+            if not packages:
+                raise HTTPException(status_code=400, detail="No policies found for RITM")
+            return await workflow.verify_policy_grouped(packages)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in pre_verify for RITM {ritm_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @router.post("/ritm/{ritm_number}/verify-policy")
 async def verify_policy_pre_check(
     ritm_number: str,

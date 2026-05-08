@@ -26,6 +26,7 @@ from ..models import (
     RITMUpdateRequest,
     RITMWithPolicies,
 )
+from ..services.ritm_transitions import assert_transition
 from ..services.snapshot_service import SnapshotService
 from ..session import SessionData, session_manager
 
@@ -217,6 +218,7 @@ async def update_ritm(
             raise HTTPException(status_code=404, detail="RITM not found")
 
         if request.status is not None:
+            assert_transition(RITMStatus(ritm.status), RITMStatus(request.status))
             if request.status == RITMStatus.READY_FOR_APPROVAL:
                 # Must be a registered editor AND currently hold the editor lock
                 editor_result = await db.execute(

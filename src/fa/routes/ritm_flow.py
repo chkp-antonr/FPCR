@@ -19,6 +19,7 @@ from sqlmodel import col
 from ..config import settings
 from ..db import engine
 from ..models import (
+    CachedSection,
     RITM,
     DomainEvidenceItem,
     EvidenceHistoryResponse,
@@ -103,6 +104,62 @@ _ATTEMPT_TYPE_LABELS: dict[str, str] = {
     "correction": "Correction",
     "approval": "Approval",
 }
+
+
+async def _build_section_uid_mapping_for_domains(
+    session: SessionData,
+    domain_names: set[str],
+) -> dict[str, str]:
+    """Build UID->name mapping for cached sections and access layers in given domains."""
+    section_uid_to_name: dict[str, str] = {}
+
+    async with AsyncSession(engine) as db:
+        sections_result = await db.execute(select(CachedSection))
+        for section in sections_result.scalars().all():
+            section_uid_to_name[section.uid] = section.name
+
+    if not domain_names:
+        return section_uid_to_name
+
+    try:
+        async with CPAIOPSClient(
+            engine=engine,
+            username=session.username,
+            password=session.password,
+            mgmt_ip=settings.api_mgmt,
+        ) as client:
+            mgmt_names = client.get_mgmt_names()
+            if not mgmt_names:
+                logger.warning("No management servers found while loading section/layer mapping")
+                return section_uid_to_name
+
+            mgmt_name = mgmt_names[0]
+            for domain_name in sorted(domain_names):
+                layers_result = await client.api_call(
+                    mgmt_name=mgmt_name,
+                    domain=domain_name,
+                    command="show-access-layers",
+                    payload={},
+                )
+
+                if not layers_result.success or not layers_result.data:
+                    logger.warning(
+                        "Failed to load access layers for domain %s: %s",
+                        domain_name,
+                        layers_result.message or layers_result.code,
+                    )
+                    continue
+
+                for layer in layers_result.data.get("access-layers", []):
+                    layer_uid = layer.get("uid")
+                    layer_name = layer.get("name")
+                    if isinstance(layer_uid, str) and isinstance(layer_name, str):
+                        if layer_uid and layer_name:
+                            section_uid_to_name[layer_uid] = layer_name
+    except Exception as exc:
+        logger.warning("Failed to build section/layer mapping: %s", exc)
+
+    return section_uid_to_name
 
 
 def _group_rows_by_attempt(rows: Sequence[RITMEvidenceSession]) -> list[dict[str, Any]]:
@@ -1037,12 +1094,17 @@ async def recreate_evidence(
                     combined["domain_changes"][row.domain_name].update(sc)
 
             pdf_generator = get_pdf_generator()
+            domain_names = {row.domain_name for row in evidence_rows if row.domain_name}
+            section_uid_to_name = await _build_section_uid_mapping_for_domains(
+                session,
+                domain_names,
+            )
             html = pdf_generator.generate_html(
                 ritm_number=ritm_number,
                 evidence_number=1,
                 username=session.username,
                 session_changes=combined,
-                section_uid_to_name={},
+                section_uid_to_name=section_uid_to_name,
             )
 
             return EvidenceResponse(
@@ -1688,13 +1750,16 @@ async def get_session_pdf(
         raise HTTPException(status_code=400, detail="No evidence sessions found for this RITM")
 
     attempt_data = _group_rows_by_attempt(rows)
+    domain_names = {row.domain_name for row in rows if row.domain_name}
 
     try:
         pdf_generator = get_pdf_generator()
+        section_uid_to_name = await _build_section_uid_mapping_for_domains(session, domain_names)
         pdf_bytes = pdf_generator.generate_pdf_multi_attempt(
             ritm_number=ritm_number,
             username=session.username,
             attempt_data=attempt_data,
+            section_uid_to_name=section_uid_to_name,
         )
         return Response(
             content=pdf_bytes,
@@ -1734,13 +1799,16 @@ async def get_session_html(
         raise HTTPException(status_code=400, detail="No evidence sessions found for this RITM")
 
     attempt_data = _group_rows_by_attempt(rows)
+    domain_names = {row.domain_name for row in rows if row.domain_name}
 
     try:
         pdf_generator = get_pdf_generator()
+        section_uid_to_name = await _build_section_uid_mapping_for_domains(session, domain_names)
         html = pdf_generator.generate_html_multi_attempt(
             ritm_number=ritm_number,
             username=session.username,
             attempt_data=attempt_data,
+            section_uid_to_name=section_uid_to_name,
         )
         return HTMLResponse(content=html)
     except Exception as e:

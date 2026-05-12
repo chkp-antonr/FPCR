@@ -225,6 +225,65 @@ def test_generate_pdf_creates_pdf_bytes() -> None:
     assert pdf_bytes[:4] == b"%PDF"
 
 
+def test_generate_html_resolves_layer_uid_with_mapping() -> None:
+    """Layer UID should render mapped section name instead of fallback."""
+    generator = SessionChangesPDFGenerator()
+
+    layer_uid = "5d4be65f-bbe8-491e-93ec-5a4a0cea4965"
+    sample_changes = {
+        "domain_changes": {
+            "General": {
+                "tasks": [
+                    {
+                        "task-details": [
+                            {
+                                "changes": [
+                                    {
+                                        "operations": {
+                                            "added-objects": [
+                                                {
+                                                    "uid": "test-uid-2",
+                                                    "name": "TestRule",
+                                                    "type": "access-rule",
+                                                    "position": 1,
+                                                    "source": [{"name": "Host_1.1.1.1"}],
+                                                    "destination": [{"name": "Any"}],
+                                                    "service": [{"name": "https"}],
+                                                    "install-on": [
+                                                        {
+                                                            "uid": "6c488338-8eec-4103-ad21-cd461ac2c476",
+                                                            "name": "Policy Targets",
+                                                        }
+                                                    ],
+                                                    "action": {"name": "Accept"},
+                                                    "track": {"type": {"name": "Log"}},
+                                                    "layer": layer_uid,
+                                                }
+                                            ],
+                                            "modified-objects": [],
+                                            "deleted-objects": [],
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+
+    html = generator.generate_html(
+        ritm_number="RITM1234567",
+        evidence_number=1,
+        username="testuser",
+        session_changes=sample_changes,
+        section_uid_to_name={layer_uid: "My Real Layer"},
+    )
+
+    assert "Section: My Real Layer" in html
+
+
 def test_generate_empty_pdf_returns_valid_pdf() -> None:
     """Test that empty session_changes generates valid PDF."""
     generator = SessionChangesPDFGenerator()

@@ -213,6 +213,16 @@ This file serves as a directory for AI assistants to find relevant research, pla
   * `src/fa/services/session_changes_pdf.py` - Updated to accept and use UID mapping
   * `src/fa/app.py` - Added arlogi `setup_logging()` initialization
 
+### 2026-05-08: RITM Correction Attempt — Rule Dedup & Diff Display
+
+* **Topic**: Rule deduplication on re-submission, blank evidence fix, source/dest diff display.
+* **Status**: ✅ Complete
+* **Tracked Results**: `docs/internal/features/260508-ritm-correction-evidence/README.md`
+* **Small Fixes**: `docs/internal/fixes/260508-ritm-correction-fixes.md`
+* **Raw Logs (Ignored)**: `docs/_AI_/2605/260508-ritm-correction-evidence/`
+* **Branch**: `dev/ritm-v3`
+* **Summary**: Four improvements to the correction attempt workflow. (1) Rule dedup: `create_objects_and_rules()` now queries `ritm_created_rules` and calls `set-access-rule` to reuse existing UIDs instead of duplicating rules. `CreateResult` tracks `updated_rule_uids` separately so rollback only deletes truly new rules. (2) Evidence panel fix: unwrap `{new-object, old-object}` wrappers from `modified-objects` in both React `SessionChangesDisplay` and PDF generator. (3) Source/dest diff: `annotateRule()` helper compares old vs new UID sets, tagging items `added/removed/same`; `renderRefList` renders colored JSX; PDF `_render_ref_items` produces ReportLab markup with green/red diff. (4) Comments and Rule Name columns in `RulesTable` made editable.
+
 ### 2026-04-24: Repository History Sanitization
 
 * **Topic**: Repository cleanup after accidental secret file commit in historical revisions.

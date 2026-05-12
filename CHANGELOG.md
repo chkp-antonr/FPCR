@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **RITM State Machine & Pre-Verify Step** (`dev/ritm-v3`)
+  - Explicit `RITMStatus` transition table replacing ad-hoc `if/elif` chains in `update_ritm()`
+  - New `POST /ritm/{number}/pre-verify` endpoint — standalone verify of all affected packages
+    before the apply step, surfacing errors early without consuming a correction attempt
+  - Removed `force_continue` flag — `try-verify` is now All-or-No: all packages must succeed or
+    none are committed
+
+- **RITM Correction Evidence — Rule Deduplication & Source/Dest Diff**
+  - Re-submission no longer duplicates rules: `create_objects_and_rules()` queries
+    `ritm_created_rules` and reuses existing UIDs via `set-access-rule` (update) with
+    `add-access-rule` as fallback
+  - `CreateResult` tracks `updated_rule_uids` separately from `created_rule_uids` so rollback
+    only deletes truly new rules; `disable_rules` covers both lists
+  - Evidence panel for correction attempts now correctly unwraps `{new-object, old-object}`
+    wrappers from `modified-objects` in both React UI and PDF generator
+  - Source/destination diff display: added/removed hosts highlighted in green/red with `+`/`−`
+    prefix and strikethrough in both the in-page evidence table and generated PDF
+
 - **Copilot Archive Command Prompt**
   - Added workspace prompt command: `.github/prompts/archive-task.prompt.md`
   - Canonical workflow path standardized to `.agents/workflows/archive-task.md`

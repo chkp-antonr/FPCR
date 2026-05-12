@@ -451,7 +451,7 @@ wheels = [
 
 [[package]]
 name = "fpcr"
-version = "0.605.8"
+version = "0.605.12"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },

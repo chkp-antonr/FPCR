@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest_asyncio
+from cpaiops import CPAIOPSClient
 from dotenv import load_dotenv
 from httpx import AsyncClient
 
@@ -212,8 +213,6 @@ async def cp_baseline() -> None:
     Constructs a CPAIOPSClient from env vars (matching seed.py exactly),
     checks for the revision, and auto-runs seed.py if it is absent.
     """
-    from cpaiops import CPAIOPSClient
-
     from tests.integration.cp_setup.revision import revision_exists
 
     mgmt_ip = os.environ["API_MGMT"]
@@ -255,8 +254,6 @@ async def cp_restored(cp_baseline: None) -> None:
 
     Depends on cp_baseline to guarantee the revision exists first.
     """
-    from cpaiops import CPAIOPSClient
-
     from tests.integration.cp_setup.revision import restore_revision
 
     mgmt_ip = os.environ["API_MGMT"]
@@ -292,8 +289,6 @@ async def cp_restored(cp_baseline: None) -> None:
 @pytest_asyncio.fixture(scope="function")
 async def admin_cp():
     """Yields a (CPAIOPSClient, mgmt_name) tuple for direct CP API calls in tests."""
-    from cpaiops import CPAIOPSClient
-
     mgmt_ip = os.environ["API_MGMT"]
     username = os.environ["API_USERNAME"]
     password = os.environ["API_PASSWORD"]

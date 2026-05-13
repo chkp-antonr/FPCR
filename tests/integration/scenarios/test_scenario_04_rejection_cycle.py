@@ -10,6 +10,8 @@ eng3: correction editor (blocked from approving forever)
 eng4: second rejecter (blocked from editing forever)
 """
 
+import os
+
 import pytest
 from httpx import AsyncClient
 
@@ -167,6 +169,7 @@ class TestRejectionCycle:
             f"/api/v1/ritm/{RITM_NUMBER}/try-verify",
             json={"skip_package_uids": []},
         )
+        assert resp.status_code == 200, resp.text
         data = resp.json()
         states = [r.get("state", "") for r in data["results"]]
         assert all(s == "verified_pending_approval_disabled" for s in states)
@@ -237,6 +240,7 @@ class TestRejectionCycle:
         resp = await eng4_client.get(
             f"/api/v1/ritm/{RITM_NUMBER}/evidence-history"
         )
+        assert resp.status_code == 200, resp.text
         sessions = [
             s
             for d in resp.json()["domains"]
@@ -294,7 +298,32 @@ class TestRejectionCycle:
         )
 
     @pytest.mark.order(21)
-    async def test_21_4_users_all_blocked_summary(
+    async def test_21_eng1_try_verify_attempt3(
+        self, eng1_client: AsyncClient
+    ):
+        """eng1 performs try-verify (attempt 3) to show they can still edit."""
+        resp = await eng1_client.post(
+            f"/api/v1/ritm/{RITM_NUMBER}/try-verify",
+            json={"skip_package_uids": []},
+        )
+        assert resp.status_code == 200, resp.text
+        states = [r.get("state", "") for r in resp.json()["results"]]
+        assert all(s == "verified_pending_approval_disabled" for s in states), (
+            f"eng1 attempt 3 should succeed: {states}"
+        )
+
+    @pytest.mark.order(22)
+    async def test_22_eng1_submits_attempt3(self, eng1_client: AsyncClient):
+        """eng1 submits attempt 3 — all 4 named users are now blocked."""
+        resp = await eng1_client.post(
+            f"/api/v1/ritm/{RITM_NUMBER}/submit-for-approval"
+        )
+        assert resp.status_code == 200, resp.text
+        check = await eng1_client.get(f"/api/v1/ritm/{RITM_NUMBER}")
+        assert check.json()["status"] == 1  # READY_FOR_APPROVAL
+
+    @pytest.mark.order(23)
+    async def test_23_4_users_all_blocked_summary(
         self, eng1_client: AsyncClient
     ):
         """
@@ -306,8 +335,6 @@ class TestRejectionCycle:
 
         Final approval would require a 5th user not in either table.
         """
-        import os
-
         resp = await eng1_client.get(f"/api/v1/ritm/{RITM_NUMBER}")
         data = resp.json()
         editors = data.get("editors", [])
@@ -315,10 +342,10 @@ class TestRejectionCycle:
         eng2_user = os.environ["ENGINEER2_USER"]
         eng3_user = os.environ["ENGINEER3_USER"]
         eng4_user = os.environ["ENGINEER4_USER"]
-        assert eng2_user in editors or any(
+        assert any(
             r["username"] == eng2_user for r in reviewers
-        ), "eng2 must appear in reviewers"
-        assert eng4_user in editors or any(
+        ), f"eng2 must be in reviewers (not editors): reviewers={reviewers}"
+        assert any(
             r["username"] == eng4_user for r in reviewers
-        ), "eng4 must appear in reviewers"
+        ), f"eng4 must be in reviewers (not editors): reviewers={reviewers}"
         assert eng3_user in editors, "eng3 must appear in editors"

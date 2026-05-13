@@ -10,10 +10,49 @@ Evidence history shows DomainA session (attempt 1) and DomainB session (attempt 
 eng4 approves and publishes -> COMPLETED.
 """
 
+import os
+
 import pytest
+from cpaiops import CPAIOPSClient
 from httpx import AsyncClient
 
 RITM_NUMBER = "RITM9990005"
+
+
+def _policy(
+    test_env: object,
+    *,
+    ritm_number: str,
+    rule_name: str,
+    domain_uid: str,
+    domain_name: str,
+    package_uid: str,
+    section_uid: str,
+    source_ips: list[str],
+    dest_ips: list[str],
+    services: list[str],
+    comments: str = "",
+) -> list[dict]:
+    return [
+        {
+            "ritm_number": ritm_number,
+            "comments": comments,
+            "rule_name": rule_name,
+            "domain_uid": domain_uid,
+            "domain_name": domain_name,
+            "package_uid": package_uid,
+            "package_name": test_env.package_name,  # type: ignore[attr-defined]
+            "section_uid": section_uid,
+            "section_name": test_env.section_name,  # type: ignore[attr-defined]
+            "position_type": "top",
+            "position_number": None,
+            "action": "accept",
+            "track": "log",
+            "source_ips": source_ips,
+            "dest_ips": dest_ips,
+            "services": services,
+        }
+    ]
 
 
 @pytest.mark.integration
@@ -31,26 +70,19 @@ class TestDomainChange:
     async def test_02_policy_domain_a_only(
         self, eng1_client: AsyncClient, test_env
     ):
-        policy = [
-            {
-                "ritm_number": RITM_NUMBER,
-                "comments": "Scenario 5 DomainA rule",
-                "rule_name": "RITM9990005_A_rule1",
-                "domain_uid": test_env.domain_a_uid,
-                "domain_name": test_env.domain_a_name,
-                "package_uid": test_env.package_a_uid,
-                "package_name": test_env.package_name,
-                "section_uid": test_env.section_a_uid,
-                "section_name": test_env.section_name,
-                "position_type": "top",
-                "position_number": None,
-                "action": "accept",
-                "track": "log",
-                "source_ips": ["10.0.0.1"],
-                "dest_ips": ["10.0.0.2"],
-                "services": ["svc_http_8080"],
-            }
-        ]
+        policy = _policy(
+            test_env,
+            ritm_number=RITM_NUMBER,
+            rule_name="RITM9990005_A_rule1",
+            domain_uid=test_env.domain_a_uid,
+            domain_name=test_env.domain_a_name,
+            package_uid=test_env.package_a_uid,
+            section_uid=test_env.section_a_uid,
+            source_ips=["10.0.0.1"],
+            dest_ips=["10.0.0.2"],
+            services=["svc_http_8080"],
+            comments="Scenario 5 DomainA rule",
+        )
         resp = await eng1_client.post(
             f"/api/v1/ritm/{RITM_NUMBER}/policy", json=policy
         )
@@ -106,26 +138,19 @@ class TestDomainChange:
     async def test_07_eng3_changes_policy_to_domain_b(
         self, eng3_client: AsyncClient, test_env
     ):
-        policy = [
-            {
-                "ritm_number": RITM_NUMBER,
-                "comments": "Scenario 5 DomainB rule (after domain change)",
-                "rule_name": "RITM9990005_B_rule1",
-                "domain_uid": test_env.domain_b_uid,
-                "domain_name": test_env.domain_b_name,
-                "package_uid": test_env.package_b_uid,
-                "package_name": test_env.package_name,
-                "section_uid": test_env.section_b_uid,
-                "section_name": test_env.section_name,
-                "position_type": "top",
-                "position_number": None,
-                "action": "accept",
-                "track": "log",
-                "source_ips": ["10.0.0.1"],
-                "dest_ips": ["Net_10.1.0.0_24"],
-                "services": ["svc_custom_9999"],
-            }
-        ]
+        policy = _policy(
+            test_env,
+            ritm_number=RITM_NUMBER,
+            rule_name="RITM9990005_B_rule1",
+            domain_uid=test_env.domain_b_uid,
+            domain_name=test_env.domain_b_name,
+            package_uid=test_env.package_b_uid,
+            section_uid=test_env.section_b_uid,
+            source_ips=["10.0.0.1"],
+            dest_ips=["Net_10.1.0.0_24"],
+            services=["svc_custom_9999"],
+            comments="Scenario 5 DomainB rule (after domain change)",
+        )
         resp = await eng3_client.post(
             f"/api/v1/ritm/{RITM_NUMBER}/policy", json=policy
         )
@@ -169,9 +194,6 @@ class TestDomainChange:
         after submit-for-approval published them. Verify via CP API.
         Also, the plan-yaml for attempt 2 should reference removal of those rules.
         """
-        import os
-        from cpaiops import CPAIOPSClient
-
         async with CPAIOPSClient(
             username=os.environ["API_USERNAME"],
             password=os.environ["API_PASSWORD"],

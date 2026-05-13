@@ -10,10 +10,7 @@ Evidence history shows DomainA session (attempt 1) and DomainB session (attempt 
 eng4 approves and publishes -> COMPLETED.
 """
 
-import os
-
 import pytest
-from cpaiops import CPAIOPSClient
 from httpx import AsyncClient
 
 RITM_NUMBER = "RITM9990005"
@@ -187,36 +184,31 @@ class TestDomainChange:
 
     @pytest.mark.order(10)
     async def test_10_cp_state_domain_a_rules_persisted(
-        self, eng3_client: AsyncClient, test_env
+        self, eng3_client: AsyncClient, test_env, admin_cp
     ):
         """
         Spec step 10: DomainA rules from attempt 1 remain in CP as published-disabled
         after submit-for-approval published them. Verify via CP API.
         Also, the plan-yaml for attempt 2 should reference removal of those rules.
         """
-        async with CPAIOPSClient(
-            username=os.environ["API_USERNAME"],
-            password=os.environ["API_PASSWORD"],
-            mgmt_ip=os.environ["API_MGMT"],
-        ) as cp:
-            mgmt_name: str = cp.get_mgmt_names()[0]
-            result = await cp.api_call(
-                mgmt_name,
-                "show-access-rule",
-                test_env.domain_a_name,
-                payload={
-                    "layer": test_env.package_name,
-                    "name": "RITM9990005_A_rule1",
-                },
-            )
-            assert result.success, (
-                "DomainA rule from attempt 1 must still exist in CP as published-disabled. "
-                f"Response: {result.data}"
-            )
-            rule_enabled = result.data.get("enabled", True)
-            assert rule_enabled is False, (
-                f"DomainA rule must be disabled (published-disabled state), got enabled={rule_enabled}"
-            )
+        cp, mgmt_name = admin_cp
+        result = await cp.api_call(
+            mgmt_name,
+            "show-access-rule",
+            test_env.domain_a_name,
+            payload={
+                "layer": test_env.package_name,
+                "name": "RITM9990005_A_rule1",
+            },
+        )
+        assert result.success, (
+            "DomainA rule from attempt 1 must still exist in CP as published-disabled. "
+            f"Response: {result.data}"
+        )
+        rule_enabled = result.data.get("enabled", True)
+        assert rule_enabled is False, (
+            f"DomainA rule must be disabled (published-disabled state), got enabled={rule_enabled}"
+        )
 
     @pytest.mark.order(11)
     async def test_11_evidence_history_has_both_domains(

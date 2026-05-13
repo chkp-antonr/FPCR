@@ -281,3 +281,27 @@ async def cp_restored(cp_baseline: None) -> None:
         await restore_revision(client, mgmt_name, REVISION_NAME)
 
     yield
+
+
+# ---------------------------------------------------------------------------
+# admin_cp — function-scoped: yields a connected CPAIOPSClient for direct CP
+#            operations in tests (scenarios that need to call CP API directly)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture(scope="function")
+async def admin_cp():
+    """Yields a (CPAIOPSClient, mgmt_name) tuple for direct CP API calls in tests."""
+    from cpaiops import CPAIOPSClient
+
+    mgmt_ip = os.environ["API_MGMT"]
+    username = os.environ["API_USERNAME"]
+    password = os.environ["API_PASSWORD"]
+
+    async with CPAIOPSClient(
+        username=username,
+        password=password,
+        mgmt_ip=mgmt_ip,
+    ) as client:
+        mgmt_name: str = client.get_mgmt_names()[0]
+        yield client, mgmt_name

@@ -10,10 +10,7 @@ Scenario 2 — Pre-Verify Error and Correction
 7. Submit -> eng2 approves -> publish -> COMPLETED.
 """
 
-import os
-
 import pytest
-from cpaiops import CPAIOPSClient
 from httpx import AsyncClient
 
 RITM_NUMBER = "RITM9990002"
@@ -25,30 +22,25 @@ class TestPreVerifyError:
 
     @pytest.mark.order(1)
     async def test_01_enable_broken_rule(
-        self, eng1_client: AsyncClient, test_env
+        self, eng1_client: AsyncClient, test_env, admin_cp
     ):
         """Enable BROKEN_RULE in DomainA so that pre-verify fails."""
-        async with CPAIOPSClient(
-            username=os.environ["API_USERNAME"],
-            password=os.environ["API_PASSWORD"],
-            mgmt_ip=os.environ["API_MGMT"],
-        ) as cp:
-            mgmt_name: str = cp.get_mgmt_names()[0]
-            await cp.api_call(
-                mgmt_name,
-                "set-access-rule",
-                test_env.domain_a_name,
-                payload={
-                    "layer": test_env.package_name,
-                    "name": "BROKEN_RULE",
-                    "enabled": True,
-                },
-            )
-            await cp.api_call(
-                mgmt_name,
-                "publish",
-                test_env.domain_a_name,
-            )
+        cp, mgmt_name = admin_cp
+        await cp.api_call(
+            mgmt_name,
+            "set-access-rule",
+            test_env.domain_a_name,
+            payload={
+                "layer": test_env.package_name,
+                "name": "BROKEN_RULE",
+                "enabled": True,
+            },
+        )
+        await cp.api_call(
+            mgmt_name,
+            "publish",
+            test_env.domain_a_name,
+        )
 
     @pytest.mark.order(2)
     async def test_02_create_ritm(self, eng1_client: AsyncClient):
@@ -112,29 +104,24 @@ class TestPreVerifyError:
 
     @pytest.mark.order(5)
     async def test_05_delete_broken_rule(
-        self, eng1_client: AsyncClient, test_env
+        self, eng1_client: AsyncClient, test_env, admin_cp
     ):
         """Delete BROKEN_RULE via CP API to fix the pre-verify issue."""
-        async with CPAIOPSClient(
-            username=os.environ["API_USERNAME"],
-            password=os.environ["API_PASSWORD"],
-            mgmt_ip=os.environ["API_MGMT"],
-        ) as cp:
-            mgmt_name: str = cp.get_mgmt_names()[0]
-            await cp.api_call(
-                mgmt_name,
-                "delete-access-rule",
-                test_env.domain_a_name,
-                payload={
-                    "layer": test_env.package_name,
-                    "name": "BROKEN_RULE",
-                },
-            )
-            await cp.api_call(
-                mgmt_name,
-                "publish",
-                test_env.domain_a_name,
-            )
+        cp, mgmt_name = admin_cp
+        await cp.api_call(
+            mgmt_name,
+            "delete-access-rule",
+            test_env.domain_a_name,
+            payload={
+                "layer": test_env.package_name,
+                "name": "BROKEN_RULE",
+            },
+        )
+        await cp.api_call(
+            mgmt_name,
+            "publish",
+            test_env.domain_a_name,
+        )
 
     @pytest.mark.order(6)
     async def test_06_preverify_passes(self, eng1_client: AsyncClient):

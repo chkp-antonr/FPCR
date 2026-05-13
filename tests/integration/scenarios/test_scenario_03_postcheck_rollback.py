@@ -7,10 +7,7 @@ Verifies rollback (POSTCHECK_FAILED_RULES_DELETED),
 then fixes and succeeds on attempt 2.
 """
 
-import os
-
 import pytest
-from cpaiops import CPAIOPSClient
 from httpx import AsyncClient
 
 RITM_NUMBER = "RITM9990003"
@@ -112,7 +109,7 @@ class TestPostCheckRollback:
 
     @pytest.mark.order(6)
     async def test_06_verify_rollback_in_cp(
-        self, eng1_client: AsyncClient, test_env
+        self, eng1_client: AsyncClient, test_env, admin_cp
     ):
         """
         Verify rollback via DB state AND CP API.
@@ -135,35 +132,30 @@ class TestPostCheckRollback:
         # If API doesn't expose attempts, test_04's state check is sufficient.
 
         # CP API check: count rules named CONFLICTING_RULE_NAME in the section
-        async with CPAIOPSClient(
-            username=os.environ["API_USERNAME"],
-            password=os.environ["API_PASSWORD"],
-            mgmt_ip=os.environ["API_MGMT"],
-        ) as cp:
-            mgmt_name: str = cp.get_mgmt_names()[0]
-            result = await cp.api_call(
-                mgmt_name,
-                "show-access-rulebase",
-                test_env.domain_a_name,
-                payload={
-                    "name": test_env.package_name,
-                    "filter": CONFLICTING_RULE_NAME,
-                    "filter-settings": {"search-mode": "general"},
-                    "limit": 50,
-                },
-            )
-            assert result.success, (
-                f"CP show-access-rulebase call failed: {result.data}"
-            )
-            rules = result.data.get("rulebase", [])
-            matching = [
-                r for r in rules
-                if r.get("name") == CONFLICTING_RULE_NAME
-            ]
-            assert len(matching) <= 1, (
-                f"Expected at most 1 rule named {CONFLICTING_RULE_NAME!r} after rollback "
-                f"(seed rule only), found {len(matching)}. Rollback may have failed."
-            )
+        cp, mgmt_name = admin_cp
+        result = await cp.api_call(
+            mgmt_name,
+            "show-access-rulebase",
+            test_env.domain_a_name,
+            payload={
+                "name": test_env.package_name,
+                "filter": CONFLICTING_RULE_NAME,
+                "filter-settings": {"search-mode": "general"},
+                "limit": 50,
+            },
+        )
+        assert result.success, (
+            f"CP show-access-rulebase call failed: {result.data}"
+        )
+        rules = result.data.get("rulebase", [])
+        matching = [
+            r for r in rules
+            if r.get("name") == CONFLICTING_RULE_NAME
+        ]
+        assert len(matching) <= 1, (
+            f"Expected at most 1 rule named {CONFLICTING_RULE_NAME!r} after rollback "
+            f"(seed rule only), found {len(matching)}. Rollback may have failed."
+        )
 
     @pytest.mark.order(7)
     async def test_07_fix_policy(

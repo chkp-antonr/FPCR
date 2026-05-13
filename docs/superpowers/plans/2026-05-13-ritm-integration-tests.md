@@ -4,7 +4,7 @@
 
 **Goal:** Build a pytest-based integration test suite with 5 ordered scenarios exercising the full RITM workflow against a real Check Point management server with four distinct CP user accounts.
 
-**Architecture:** Pytest class-based scenarios with `pytest-order` enforcing step sequence; CP named-revision restore (`ritm_integration_baseline`) + RITM-table truncation before each scenario for deterministic state; four `AsyncClient` fixtures (eng1–eng4) authenticating as real CP accounts; file-based SQLite for RITM state that persists across steps within a session.
+**Architecture:** Pytest class-based scenarios with `pytest-order` enforcing step sequence; CP named-revision restore (`ritm_integration_baseline`) + SQLite DB file deletion before each scenario for deterministic state; four `AsyncClient` fixtures (eng1–eng4) authenticating as real CP accounts; file-based SQLite recreated fresh per scenario. Seed runs only when the named CP revision is absent — once the revision exists, seed is never re-run.
 
 **Tech Stack:** Python 3.13, pytest + pytest-asyncio + pytest-order, httpx AsyncClient, SQLModel + aiosqlite, cpaiops (internal Check Point client), python-dotenv.
 
@@ -37,6 +37,7 @@
 ## Task 1 — Scaffolding and Dependencies
 
 **Files:**
+
 - Modify: `pyproject.toml`
 - Modify: `.gitignore`
 - Create: `tests/integration/__init__.py`, `tests/integration/cp_setup/__init__.py`, `tests/integration/scenarios/__init__.py`
@@ -151,6 +152,7 @@
 ## Task 2 — CP Seed Schema
 
 **Files:**
+
 - Create: `tests/integration/cp_setup/schema.yaml`
 
 - [ ] **Step 1: Create schema.yaml**
@@ -219,6 +221,7 @@
 ## Task 3 — CP Revision Module
 
 **Files:**
+
 - Create: `tests/integration/cp_setup/revision.py`
 
 The Check Point Management API (R80.10+) exposes `show-revisions` and `revert-to-revision` commands. This module wraps them via the cpaiops client.
@@ -332,6 +335,7 @@ The Check Point Management API (R80.10+) exposes `show-revisions` and `revert-to
 ## Task 4 — CP Seed Script
 
 **Files:**
+
 - Create: `tests/integration/cp_setup/seed.py`
 
 The seed script is run once (or re-run safely) to create the CP baseline. It reads `schema.yaml`, checks what already exists, creates what is missing, publishes, then creates/updates the named revision.
@@ -521,9 +525,20 @@ The seed script is run once (or re-run safely) to create the CP baseline. It rea
       return section_uid
 
 
-  async def main(check_only: bool = False) -> None:
+  async def main(check_only: bool = False, force: bool = False) -> None:
       # Import CPAIOPS global — adjust import path if the module location differs.
       from src.fa.cpaiops import CPAIOPS  # noqa: adjust if needed
+      from tests.integration.cp_setup.revision import revision_exists
+
+      # Skip seed entirely if the baseline revision already exists (unless --force).
+      if not force and not check_only:
+          if await revision_exists(CPAIOPS, REVISION_NAME):
+              log.info(
+                  "Revision %r already exists — seed skipped. "
+                  "Use --force to re-seed.",
+                  REVISION_NAME,
+              )
+              return
 
       schema = yaml.safe_load(SCHEMA_PATH.read_text())
 
@@ -565,9 +580,18 @@ The seed script is run once (or re-run safely) to create the CP baseline. It rea
 
   if __name__ == "__main__":
       parser = argparse.ArgumentParser()
-      parser.add_argument("--check", action="store_true")
+      parser.add_argument(
+          "--check",
+          action="store_true",
+          help="Dry-run: list existing objects, make no changes.",
+      )
+      parser.add_argument(
+          "--force",
+          action="store_true",
+          help="Re-seed even if the named revision already exists.",
+      )
       args = parser.parse_args()
-      asyncio.run(main(check_only=args.check))
+      asyncio.run(main(check_only=args.check, force=args.force))
   ```
 
 - [ ] **Step 2: Commit**
@@ -582,6 +606,7 @@ The seed script is run once (or re-run safely) to create the CP baseline. It rea
 ## Task 5 — Integration conftest.py
 
 **Files:**
+
 - Create: `tests/integration/conftest.py`
 
 This is the most important file. It wires together: env loading, DB engine (file-based SQLite), 4 authenticated clients, `TestEnv` (domain/package/section UIDs), and the CP revision reset fixture.
@@ -597,9 +622,10 @@ This is the most important file. It wires together: env loading, DB engine (file
   Prerequisites:
     1. Copy tests/integration/.env.test.example → tests/integration/.env.test
        and fill in real credentials.
-    2. Run: uv run python tests/integration/cp_setup/seed.py
-    3. Start FPCR: uv run uvicorn src.fa.app:app --reload
+    2. Start FPCR: uv run uvicorn src.fa.app:app --reload
        (or set FPCR_BASE_URL to a running instance)
+    3. Seed runs automatically on first pytest run if the named CP revision is absent.
+       Force a re-seed manually: uv run python tests/integration/cp_setup/seed.py --force
   """
 
   from __future__ import annotations
@@ -762,54 +788,58 @@ This is the most important file. It wires together: env loading, DB engine (file
 
 
   # ---------------------------------------------------------------------------
+  # CP baseline — ensures named revision exists (auto-seeds if absent)
+  # ---------------------------------------------------------------------------
+
+  @pytest_asyncio.fixture(scope="session", autouse=True)
+  async def cp_baseline() -> None:
+      """
+      Session-scoped guard: runs once before any test.
+      If the named CP revision is absent, runs seed.py automatically.
+      If it already exists, does nothing — seed is never re-run.
+      """
+      from src.fa.cpaiops import CPAIOPS  # adjust import path if needed
+      from tests.integration.cp_setup.revision import revision_exists
+      from tests.integration.cp_setup.seed import main as run_seed
+
+      if not await revision_exists(CPAIOPS, REVISION_NAME):
+          import logging
+          logging.getLogger(__name__).warning(
+              "Baseline revision %r not found — running seed.", REVISION_NAME
+          )
+          await run_seed()
+      yield
+
+
+  # ---------------------------------------------------------------------------
   # CP revision restore — resets CP + FPCR DB between scenarios
   # ---------------------------------------------------------------------------
 
   @pytest_asyncio.fixture(scope="class")
-  async def cp_restored(eng1_client: AsyncClient) -> None:
+  async def cp_restored(cp_baseline: None) -> None:
       """
-      Restore CP to the baseline revision and wipe RITM DB tables.
-      Runs once before each scenario class.
+      Reset before each scenario:
+        1. Delete the SQLite DB file so the app recreates it fresh on next request.
+        2. Revert CP to the named baseline revision.
 
-      CP restore: POST /api/v1/admin/restore-revision (if available)
-      or directly via CPAIOPS (see revision.py).
-
-      DB wipe: DELETE all RITM-related rows via the FPCR admin endpoint
-      or directly against the DB engine.
+      The FPCR app holds an async engine pointing at INTEGRATION_DB_PATH.
+      Deleting the file is sufficient — SQLite recreates it on first connect
+      and the app's lifespan calls init_database() which creates all tables.
       """
-      # Option A: if FPCR exposes a test-reset endpoint (add one if needed):
-      #   resp = await eng1_client.post("/api/v1/admin/test-reset")
-      #   assert resp.status_code == 200
-      #
-      # Option B: directly call CP revision restore + truncate DB.
-      #   This is the fallback — uncomment and adjust cpaiops import:
-      #
-      # from src.fa.cpaiops import CPAIOPS
-      # from tests.integration.cp_setup.revision import restore_revision
-      # await restore_revision(CPAIOPS, REVISION_NAME)
-      #
-      # from src.fa import db as fa_db
-      # from src.fa.models import (
-      #     RITM, Policy, RITMEditor, RITMReviewer,
-      #     RITMPackageAttempt, RITMEvidenceSession,
-      #     RITMCreatedObject, RITMCreatedRule,
-      #     RITMVerification, RITMEditSnapshot,
-      # )
-      # from sqlmodel.ext.asyncio.session import AsyncSession
-      # async with AsyncSession(fa_db.engine) as session:
-      #     for model in (
-      #         RITMEditSnapshot, RITMEvidenceSession, RITMPackageAttempt,
-      #         RITMCreatedRule, RITMCreatedObject, RITMVerification,
-      #         RITMReviewer, RITMEditor, Policy, RITM,
-      #     ):
-      #         await session.exec(delete(model))
-      #     await session.commit()
-      raise NotImplementedError(
-          "cp_restored: choose Option A or Option B above and uncomment."
-      )
+      from pathlib import Path
+
+      from src.fa.cpaiops import CPAIOPS  # adjust import path if needed
+      from tests.integration.cp_setup.revision import restore_revision
+
+      db_path = Path(os.environ.get("INTEGRATION_DB_PATH", "tests/integration/test.db"))
+      if db_path.exists():
+          db_path.unlink()
+
+      await restore_revision(CPAIOPS, REVISION_NAME)
+      yield
   ```
 
-  **Important:** The `cp_restored` fixture body has two options. Pick one and uncomment it. Option A (test-reset endpoint) is cleaner if you add a `DELETE /api/v1/admin/test-reset` route to the app for test environments. Option B calls cpaiops directly. Implement whichever fits before running scenarios.
+  **Reset strategy (confirmed):** Delete the SQLite DB file + CP revert-to-revision. No app-side reset endpoint needed.
 
 - [ ] **Step 2: Write a minimal wiring test**
 
@@ -866,6 +896,7 @@ This is the most important file. It wires together: env loading, DB engine (file
 ## Task 6 — Scenario 1: Happy Path
 
 **Files:**
+
 - Create: `tests/integration/scenarios/test_scenario_01_happy_path.py`
 
 **Actors:** eng1 (editor), eng2 (approver).
@@ -1183,6 +1214,7 @@ This is the most important file. It wires together: env loading, DB engine (file
 ## Task 7 — Scenario 2: Pre-Verify Error and Correction
 
 **Files:**
+
 - Create: `tests/integration/scenarios/test_scenario_02_preverify_error.py`
 
 **CP state at start:** Baseline + BROKEN_RULE **enabled** in DomainA (seed creates it disabled; this scenario enables it as step 1).
@@ -1409,6 +1441,7 @@ This is the most important file. It wires together: env loading, DB engine (file
 ## Task 8 — Scenario 3: Post-Check Rollback
 
 **Files:**
+
 - Create: `tests/integration/scenarios/test_scenario_03_postcheck_rollback.py`
 
 **Trick:** Create policy with duplicate rule name in the same section position — CP's post-check verify-policy will reject it. The rule is created, post-check fails, rollback deletes the rule.
@@ -1639,6 +1672,7 @@ This is the most important file. It wires together: env loading, DB engine (file
 ## Task 9 — Scenario 4: Rejection Cycle / 4-User Separation of Duties
 
 **Files:**
+
 - Create: `tests/integration/scenarios/test_scenario_04_rejection_cycle.py`
 
 This is the most important scenario for role-block verification. 22 steps.
@@ -1994,6 +2028,7 @@ This is the most important scenario for role-block verification. 22 steps.
 ## Task 10 — Scenario 5: Domain Change After Rejection
 
 **Files:**
+
 - Create: `tests/integration/scenarios/test_scenario_05_domain_change.py`
 
 - [ ] **Step 1: Write the scenario**

@@ -18,7 +18,7 @@ async def list_revisions(client: Any, mgmt_name: str, domain: str = "") -> list[
         mgmt_name,
         "show-sessions",
         domain,
-        payload={"details-level": "full", "view-published-sessions": True},
+        payload={"details-level": "full", "view-published-sessions": True, "limit": 500},
     )
     if not result.success or not result.data:
         return []
@@ -54,7 +54,11 @@ async def create_revision(
         raise RuntimeError(
             f"Failed to create revision {name!r}: {result.message} (code={result.code})"
         )
-    uid: str = result.data["uid"]
+    uid = result.data.get("uid", "")
+    if not uid:
+        raise RuntimeError(
+            f"create_revision: CP response missing 'uid'. Full response: {result.data}"
+        )
     log.info("Created revision %r uid=%s", name, uid)
     return uid
 

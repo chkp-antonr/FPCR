@@ -34,10 +34,6 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 SCHEMA_PATH = Path(__file__).parent / "schema.yaml"
-DOMAIN_A = os.environ["TEST_DOMAIN_A"]
-DOMAIN_B = os.environ["TEST_DOMAIN_B"]
-PACKAGE_NAME = os.environ["TEST_PACKAGE_NAME"]
-REVISION_NAME = os.environ["CP_REVISION_NAME"]
 
 # Credentials used exclusively by seed.py (admin account).
 _API_MGMT = os.environ["API_MGMT"]
@@ -163,12 +159,10 @@ async def _rule_exists_in_section(
 
 
 async def ensure_broken_rule(
-    client: Any, mgmt_name: str, schema: dict, section_uid: str
+    client: Any, mgmt_name: str, schema: dict, section_uid: str, domain: str, package: str
 ) -> None:
     """Create BROKEN_RULE in TEST_DOMAIN_A if absent (disabled at rest)."""
     br = schema["broken_rule"]
-    domain = DOMAIN_A
-    package = PACKAGE_NAME
     if await _rule_exists_in_section(client, mgmt_name, domain, package, br["name"]):
         log.info("[%s] BROKEN_RULE already exists — skip", domain)
         return
@@ -192,11 +186,10 @@ async def ensure_broken_rule(
 
 
 async def ensure_conflict_seed_rule(
-    client: Any, mgmt_name: str, schema: dict, section_uid: str, domain: str
+    client: Any, mgmt_name: str, schema: dict, section_uid: str, domain: str, package: str
 ) -> None:
     """Create RITM_TEST_SECTION_CONFLICT rule if absent (used by Scenario 3)."""
     cr = schema["conflict_seed_rule"]
-    package = PACKAGE_NAME
     if await _rule_exists_in_section(client, mgmt_name, domain, package, cr["name"]):
         log.info("[%s] conflict seed rule already exists — skip", domain)
         return
@@ -220,13 +213,13 @@ async def ensure_conflict_seed_rule(
 
 
 async def seed_domain(
-    client: Any, mgmt_name: str, domain: str, schema: dict
+    client: Any, mgmt_name: str, domain: str, schema: dict, package: str
 ) -> str:
     """Seed all objects and sections for one domain. Returns section UID."""
     log.info("=== Seeding domain: %s ===", domain)
-    package = PACKAGE_NAME
 
-    section_uid = await ensure_section(client, mgmt_name, domain, package, "RITM_TEST_SECTION")
+    section_name = schema["sections"][0]["name"]
+    section_uid = await ensure_section(client, mgmt_name, domain, package, section_name)
 
     for h in schema["hosts"]:
         await ensure_host(client, mgmt_name, domain, h["name"], h["ip"])
@@ -249,6 +242,11 @@ async def main(check_only: bool = False, force: bool = False) -> None:
         revision_exists,
     )
 
+    domain_a = os.environ["TEST_DOMAIN_A"]
+    domain_b = os.environ["TEST_DOMAIN_B"]
+    package_name = os.environ["TEST_PACKAGE_NAME"]
+    revision_name = os.environ["CP_REVISION_NAME"]
+
     async with CPAIOPSClient(
         username=_API_USERNAME,
         password=_API_PASSWORD,
@@ -260,11 +258,11 @@ async def main(check_only: bool = False, force: bool = False) -> None:
 
         # Skip seed entirely if the baseline revision already exists (unless --force).
         if not force and not check_only:
-            if await revision_exists(client, mgmt_name, REVISION_NAME):
+            if await revision_exists(client, mgmt_name, revision_name):
                 log.info(
                     "Revision %r already exists — seed skipped. "
                     "Use --force to re-seed.",
-                    REVISION_NAME,
+                    revision_name,
                 )
                 return
 
@@ -273,29 +271,29 @@ async def main(check_only: bool = False, force: bool = False) -> None:
         if check_only:
             log.info("--check mode: listing existing objects only (no changes)")
 
-        section_uid_a = await seed_domain(client, mgmt_name, DOMAIN_A, schema)
-        section_uid_b = await seed_domain(client, mgmt_name, DOMAIN_B, schema)
+        section_uid_a = await seed_domain(client, mgmt_name, domain_a, schema, package_name)
+        section_uid_b = await seed_domain(client, mgmt_name, domain_b, schema, package_name)
 
         if not check_only:
-            await ensure_broken_rule(client, mgmt_name, schema, section_uid_a)
+            await ensure_broken_rule(client, mgmt_name, schema, section_uid_a, domain_a, package_name)
             await ensure_conflict_seed_rule(
-                client, mgmt_name, schema, section_uid_a, DOMAIN_A
+                client, mgmt_name, schema, section_uid_a, domain_a, package_name
             )
             await ensure_conflict_seed_rule(
-                client, mgmt_name, schema, section_uid_b, DOMAIN_B
+                client, mgmt_name, schema, section_uid_b, domain_b, package_name
             )
 
-            for domain in (DOMAIN_A, DOMAIN_B):
+            for domain in (domain_a, domain_b):
                 await client.api_call(mgmt_name, "publish", domain)
                 log.info("[%s] published", domain)
 
             await create_revision(
                 client,
                 mgmt_name,
-                REVISION_NAME,
+                revision_name,
                 "RITM integration test baseline",
             )
-            log.info("Baseline revision %r ready.", REVISION_NAME)
+            log.info("Baseline revision %r ready.", revision_name)
 
 
 if __name__ == "__main__":

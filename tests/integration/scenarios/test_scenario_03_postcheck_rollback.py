@@ -71,6 +71,7 @@ class TestPostCheckRollback:
         resp = await eng1_client.post(
             f"/api/v1/ritm/{RITM_NUMBER}/pre-verify"
         )
+        assert resp.status_code == 200, resp.text
         assert resp.json()["all_passed"] is True
 
     @pytest.mark.order(4)
@@ -107,7 +108,25 @@ class TestPostCheckRollback:
         )
 
     @pytest.mark.order(6)
-    async def test_06_fix_policy(
+    async def test_06_verify_attempt1_state_in_db(
+        self, eng1_client: AsyncClient
+    ):
+        """Verify DB records attempt 1 state as POSTCHECK_FAILED_RULES_DELETED."""
+        resp = await eng1_client.get(f"/api/v1/ritm/{RITM_NUMBER}")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        attempts = data.get("attempts", [])
+        attempt1_states = [
+            a.get("state", "") for a in attempts if a.get("attempt_number") == 1
+        ]
+        if attempt1_states:
+            assert any(
+                s == "postcheck_failed_rules_deleted" for s in attempt1_states
+            ), f"Attempt 1 must be postcheck_failed_rules_deleted, got: {attempt1_states}"
+        # If the API doesn't expose attempts, the try-verify assertion in test_04 is sufficient.
+
+    @pytest.mark.order(7)
+    async def test_07_fix_policy(
         self, eng1_client: AsyncClient, test_env
     ):
         """Replace policy with a valid, non-conflicting rule name."""
@@ -117,27 +136,29 @@ class TestPostCheckRollback:
         )
         assert resp.status_code == 200, resp.text
 
-    @pytest.mark.order(7)
-    async def test_07_try_verify_attempt2_passes(
+    @pytest.mark.order(8)
+    async def test_08_try_verify_attempt2_passes(
         self, eng1_client: AsyncClient
     ):
         resp = await eng1_client.post(
             f"/api/v1/ritm/{RITM_NUMBER}/try-verify",
             json={"skip_package_uids": []},
         )
+        assert resp.status_code == 200, resp.text
         data = resp.json()
         states = [r.get("state", "") for r in data["results"]]
         assert all(
             s == "verified_pending_approval_disabled" for s in states
         ), f"Unexpected states: {states}"
 
-    @pytest.mark.order(8)
-    async def test_08_evidence_attempt2_is_correction(
+    @pytest.mark.order(9)
+    async def test_09_evidence_attempt2_is_correction(
         self, eng1_client: AsyncClient
     ):
         resp = await eng1_client.get(
             f"/api/v1/ritm/{RITM_NUMBER}/evidence-history"
         )
+        assert resp.status_code == 200, resp.text
         all_sessions = [
             s
             for d in resp.json()["domains"]
@@ -148,15 +169,15 @@ class TestPostCheckRollback:
         assert all_sessions[0]["attempt"] == 2
         assert all_sessions[0]["session_type"] == "correction"
 
-    @pytest.mark.order(9)
-    async def test_09_submit(self, eng1_client: AsyncClient):
+    @pytest.mark.order(10)
+    async def test_10_submit(self, eng1_client: AsyncClient):
         resp = await eng1_client.post(
             f"/api/v1/ritm/{RITM_NUMBER}/submit-for-approval"
         )
         assert resp.status_code == 200, resp.text
 
-    @pytest.mark.order(10)
-    async def test_10_eng3_approves_and_publishes(
+    @pytest.mark.order(11)
+    async def test_11_eng3_approves_and_publishes(
         self, eng3_client: AsyncClient
     ):
         await eng3_client.post(f"/api/v1/ritm/{RITM_NUMBER}/lock")

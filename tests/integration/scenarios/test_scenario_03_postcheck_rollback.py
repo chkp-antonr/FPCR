@@ -108,10 +108,19 @@ class TestPostCheckRollback:
         )
 
     @pytest.mark.order(6)
-    async def test_06_verify_attempt1_state_in_db(
-        self, eng1_client: AsyncClient
+    async def test_06_verify_rollback_in_cp(
+        self, eng1_client: AsyncClient, test_env
     ):
-        """Verify DB records attempt 1 state as POSTCHECK_FAILED_RULES_DELETED."""
+        """
+        Verify rollback via DB state AND CP API.
+        DB: attempt 1 state must be postcheck_failed_rules_deleted.
+        CP: section must contain exactly 1 rule named CONFLICTING_RULE_NAME (the seed rule),
+            not 2 (which would mean the RITM-created copy was not deleted).
+        """
+        import os
+        from cpaiops import CPAIOPSClient
+
+        # DB state check
         resp = await eng1_client.get(f"/api/v1/ritm/{RITM_NUMBER}")
         assert resp.status_code == 200, resp.text
         data = resp.json()
@@ -123,7 +132,35 @@ class TestPostCheckRollback:
             assert any(
                 s == "postcheck_failed_rules_deleted" for s in attempt1_states
             ), f"Attempt 1 must be postcheck_failed_rules_deleted, got: {attempt1_states}"
-        # If the API doesn't expose attempts, the try-verify assertion in test_04 is sufficient.
+
+        # CP API check: count rules named CONFLICTING_RULE_NAME in the section
+        async with CPAIOPSClient(
+            username=os.environ["API_USERNAME"],
+            password=os.environ["API_PASSWORD"],
+            mgmt_ip=os.environ["API_MGMT"],
+        ) as cp:
+            mgmt_name: str = cp.get_mgmt_names()[0]
+            result = await cp.api_call(
+                mgmt_name,
+                "show-access-rulebase",
+                test_env.domain_a_name,
+                payload={
+                    "name": test_env.package_name,
+                    "filter": CONFLICTING_RULE_NAME,
+                    "filter-settings": {"search-mode": "general"},
+                    "limit": 50,
+                },
+            )
+            if result.success:
+                rules = result.data.get("rulebase", [])
+                matching = [
+                    r for r in rules
+                    if r.get("name") == CONFLICTING_RULE_NAME
+                ]
+                assert len(matching) <= 1, (
+                    f"Expected at most 1 rule named {CONFLICTING_RULE_NAME!r} after rollback "
+                    f"(seed rule only), found {len(matching)}. Rollback may have failed."
+                )
 
     @pytest.mark.order(7)
     async def test_07_fix_policy(

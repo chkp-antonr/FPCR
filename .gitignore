@@ -36,3 +36,7 @@ _tmp/
 .env
 .env.secrets
 docs/_AI_
+
+# Integration test credentials and local DB
+tests/integration/.env.test
+tests/integration/test.db

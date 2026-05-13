@@ -1,7 +1,9 @@
 # RITM Integration Test Suite — Design Spec
 
 **Date:** 2026-05-13
+
 **Status:** Approved for implementation
+
 **Author:** Anton Razumov
 
 ---

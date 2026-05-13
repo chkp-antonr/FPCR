@@ -64,6 +64,7 @@ class TestDomainChange:
             f"/api/v1/ritm/{RITM_NUMBER}/try-verify",
             json={"skip_package_uids": []},
         )
+        assert resp.status_code == 200, resp.text
         data = resp.json()
         states = [r.get("state", "") for r in data["results"]]
         assert all(s == "verified_pending_approval_disabled" for s in states)
@@ -154,17 +155,55 @@ class TestDomainChange:
             f"/api/v1/ritm/{RITM_NUMBER}/try-verify",
             json={"skip_package_uids": []},
         )
+        assert resp.status_code == 200, resp.text
         data = resp.json()
         states = [r.get("state", "") for r in data["results"]]
         assert all(s == "verified_pending_approval_disabled" for s in states)
 
     @pytest.mark.order(10)
-    async def test_10_evidence_history_has_both_domains(
+    async def test_10_cp_state_domain_a_rules_persisted(
+        self, eng3_client: AsyncClient, test_env
+    ):
+        """
+        Spec step 10: DomainA rules from attempt 1 remain in CP as published-disabled
+        after submit-for-approval published them. Verify via CP API.
+        Also, the plan-yaml for attempt 2 should reference removal of those rules.
+        """
+        import os
+        from cpaiops import CPAIOPSClient
+
+        async with CPAIOPSClient(
+            username=os.environ["API_USERNAME"],
+            password=os.environ["API_PASSWORD"],
+            mgmt_ip=os.environ["API_MGMT"],
+        ) as cp:
+            mgmt_name: str = cp.get_mgmt_names()[0]
+            result = await cp.api_call(
+                mgmt_name,
+                "show-access-rule",
+                test_env.domain_a_name,
+                payload={
+                    "layer": test_env.package_name,
+                    "name": "RITM9990005_A_rule1",
+                },
+            )
+            assert result.success, (
+                "DomainA rule from attempt 1 must still exist in CP as published-disabled. "
+                f"Response: {result.data}"
+            )
+            rule_enabled = result.data.get("enabled", True)
+            assert rule_enabled is False, (
+                f"DomainA rule must be disabled (published-disabled state), got enabled={rule_enabled}"
+            )
+
+    @pytest.mark.order(11)
+    async def test_11_evidence_history_has_both_domains(
         self, eng3_client: AsyncClient, test_env
     ):
         resp = await eng3_client.get(
             f"/api/v1/ritm/{RITM_NUMBER}/evidence-history"
         )
+        assert resp.status_code == 200, resp.text
         data = resp.json()
         domain_names = {d["domain_name"] for d in data["domains"]}
         assert test_env.domain_a_name in domain_names, (
@@ -181,29 +220,34 @@ class TestDomainChange:
                             f"DomainB sessions must be 'correction', got {s['session_type']}"
                         )
 
-    @pytest.mark.order(11)
-    async def test_11_eng3_submits(self, eng3_client: AsyncClient):
+    @pytest.mark.order(12)
+    async def test_12_eng3_submits(self, eng3_client: AsyncClient):
         resp = await eng3_client.post(
             f"/api/v1/ritm/{RITM_NUMBER}/submit-for-approval"
         )
         assert resp.status_code == 200, resp.text
 
-    @pytest.mark.order(12)
-    async def test_12_eng4_approves(self, eng4_client: AsyncClient):
+    @pytest.mark.order(13)
+    async def test_13_eng4_approves(self, eng4_client: AsyncClient):
         await eng4_client.post(f"/api/v1/ritm/{RITM_NUMBER}/lock")
         resp = await eng4_client.put(
             f"/api/v1/ritm/{RITM_NUMBER}", json={"status": 2}
         )
         assert resp.status_code == 200, resp.text
+        check = await eng4_client.get(f"/api/v1/ritm/{RITM_NUMBER}")
+        assert check.status_code == 200, check.text
+        assert check.json()["status"] == 2, f"Expected APPROVED (2), got {check.json()['status']}"
 
-    @pytest.mark.order(13)
-    async def test_13_eng4_publishes(self, eng4_client: AsyncClient):
+    @pytest.mark.order(14)
+    async def test_14_eng4_publishes(self, eng4_client: AsyncClient):
         resp = await eng4_client.post(
             f"/api/v1/ritm/{RITM_NUMBER}/publish"
         )
+        assert resp.status_code == 200, resp.text
         assert resp.json()["success"] is True
 
-    @pytest.mark.order(14)
-    async def test_14_completed(self, eng4_client: AsyncClient):
+    @pytest.mark.order(15)
+    async def test_15_completed(self, eng4_client: AsyncClient):
         check = await eng4_client.get(f"/api/v1/ritm/{RITM_NUMBER}")
+        assert check.status_code == 200, check.text
         assert check.json()["status"] == 3  # COMPLETED

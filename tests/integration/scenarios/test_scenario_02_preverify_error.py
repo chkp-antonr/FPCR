@@ -103,6 +103,12 @@ class TestPreVerifyError:
             for e in r.get("errors", [])
         ]
         assert len(all_errors) > 0, "Expected error messages in pre-verify result"
+        broken_rule_mentioned = any(
+            "BROKEN_RULE" in str(e) for e in all_errors
+        )
+        assert broken_rule_mentioned, (
+            f"Expected at least one error to mention BROKEN_RULE: {all_errors}"
+        )
 
     @pytest.mark.order(5)
     async def test_05_delete_broken_rule(

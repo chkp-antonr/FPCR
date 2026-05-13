@@ -1,0 +1,60 @@
+# Declarative CP seed for integration tests.
+# seed.py reads this and creates missing resources idempotently.
+# Both TEST_DOMAIN_A and TEST_DOMAIN_B receive the same seed.
+
+sections:
+  - name: RITM_TEST_SECTION
+    # Inserted above the first rule in the top-level policy package.
+    position: top
+
+hosts:
+  - name: Host_10.0.0.1
+    ip: 10.0.0.1
+  - name: Host_10.0.0.2
+    ip: 10.0.0.2
+  # BROKEN host — no IP gateway route; causes verify-policy to emit an error.
+  # Used only in Scenario 2 (pre-verify error).
+  - name: Host_BROKEN
+    ip: 10.255.255.254
+    broken: true
+
+networks:
+  - name: Net_10.1.0.0_24
+    subnet: 10.1.0.0
+    mask-length: 24
+
+services:
+  - name: svc_http_8080
+    type: tcp
+    port: 8080
+  - name: svc_custom_9999
+    type: tcp
+    port: 9999
+
+# BROKEN_RULE — rule in RITM_TEST_SECTION that causes verify-policy failure.
+# References Host_BROKEN as source. Installed only in TEST_DOMAIN_A.
+# seed.py creates this rule and leaves it disabled.
+# Scenario 2 enables it before running pre-verify, then deletes it to fix.
+broken_rule:
+  name: BROKEN_RULE
+  domain: TEST_DOMAIN_A     # only in DomainA
+  section: RITM_TEST_SECTION
+  source: Host_BROKEN
+  destination: Any
+  service: Any
+  action: accept
+  track: log
+  enabled: false            # disabled at rest; Scenario 2 enables it to trigger error
+
+# Pre-existing rule in RITM_TEST_SECTION used by Scenario 3 to trigger post-check failure.
+# seed.py creates this rule so adding a second rule with the same name fails post-check.
+conflict_seed_rule:
+  name: RITM_TEST_SECTION_CONFLICT
+  domain: both    # both TEST_DOMAIN_A and TEST_DOMAIN_B
+  section: RITM_TEST_SECTION
+  source: Host_10.0.0.1
+  destination: Host_10.0.0.2
+  service: svc_http_8080
+  action: accept
+  track: log
+  enabled: true

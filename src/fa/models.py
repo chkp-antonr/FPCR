@@ -605,6 +605,7 @@ class EvidenceResponse(BaseModel):
     html: str
     yaml: str
     changes: dict[str, Any]
+    layer_uid_to_name: dict[str, str] = {}
 
 
 class EvidenceSessionItem(BaseModel):

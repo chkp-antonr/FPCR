@@ -13,14 +13,15 @@ from cpaiops import CPAIOPSClient
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from ..config import settings
 from ..db import engine
 from ..models import (
-    CachedSection,
     RITM,
+    CachedSection,
     DomainEvidenceItem,
     EvidenceHistoryResponse,
     EvidenceResponse,
@@ -73,6 +74,9 @@ async def get_session_data(request: Request) -> SessionData:
 _initials_loader: InitialsLoader | None = None
 _evidence_generator: EvidenceGenerator | None = None
 _pdf_generator: SessionChangesPDFGenerator | None = None
+_recreate_cpaiops_client: CPAIOPSClient | None = None
+_recreate_cpaiops_key: tuple[str, str, str] | None = None
+_recreate_cpaiops_lock = asyncio.Lock()
 
 
 def get_initials_loader() -> InitialsLoader:
@@ -99,6 +103,46 @@ def get_pdf_generator() -> SessionChangesPDFGenerator:
     return _pdf_generator
 
 
+async def _get_recreate_cpaiops_client(session: SessionData) -> CPAIOPSClient:
+    """Get a shared CPAIOPS client for recreate-evidence, rebuilding when credentials change."""
+    global _recreate_cpaiops_client, _recreate_cpaiops_key
+
+    key = (session.username, session.password, settings.api_mgmt)
+    async with _recreate_cpaiops_lock:
+        if _recreate_cpaiops_client is not None and _recreate_cpaiops_key == key:
+            return _recreate_cpaiops_client
+
+        if _recreate_cpaiops_client is not None:
+            await _recreate_cpaiops_client.close()
+            _recreate_cpaiops_client = None
+            _recreate_cpaiops_key = None
+
+        client = CPAIOPSClient(
+            engine=engine,
+            username=session.username,
+            password=session.password,
+            mgmt_ip=settings.api_mgmt,
+        )
+
+        # Avoid startup cleanup writes for this request path; it causes lock contention.
+        setattr(client, "schedule_startup_cleanup", lambda: None)
+        await client.__aenter__()
+
+        _recreate_cpaiops_client = client
+        _recreate_cpaiops_key = key
+        return client
+
+
+async def close_ritm_flow_clients() -> None:
+    """Close module-level clients on app shutdown."""
+    global _recreate_cpaiops_client, _recreate_cpaiops_key
+    async with _recreate_cpaiops_lock:
+        if _recreate_cpaiops_client is not None:
+            await _recreate_cpaiops_client.close()
+            _recreate_cpaiops_client = None
+            _recreate_cpaiops_key = None
+
+
 _ATTEMPT_TYPE_LABELS: dict[str, str] = {
     "initial": "Initial",
     "correction": "Correction",
@@ -117,6 +161,8 @@ async def _build_section_uid_mapping_for_domains(
         sections_result = await db.execute(select(CachedSection))
         for section in sections_result.scalars().all():
             section_uid_to_name[section.uid] = section.name
+
+    logger.info("Section UID mapping: %d entries from cache", len(section_uid_to_name))
 
     if not domain_names:
         return section_uid_to_name
@@ -139,7 +185,7 @@ async def _build_section_uid_mapping_for_domains(
                     mgmt_name=mgmt_name,
                     domain=domain_name,
                     command="show-access-layers",
-                    payload={},
+                    payload={"details-level": "full"},
                 )
 
                 if not layers_result.success or not layers_result.data:
@@ -150,15 +196,26 @@ async def _build_section_uid_mapping_for_domains(
                     )
                     continue
 
+                layers_list = layers_result.data.get("access-layers", [])
+                added = 0
                 for layer in layers_result.data.get("access-layers", []):
                     layer_uid = layer.get("uid")
                     layer_name = layer.get("name")
                     if isinstance(layer_uid, str) and isinstance(layer_name, str):
                         if layer_uid and layer_name:
                             section_uid_to_name[layer_uid] = layer_name
+                            added += 1
+                logger.info(
+                    "Section UID mapping: added %d layers for domain %s", added, domain_name
+                )
     except Exception as exc:
         logger.warning("Failed to build section/layer mapping: %s", exc)
 
+    logger.info(
+        "Section UID mapping: %d total entries for domains %s",
+        len(section_uid_to_name),
+        domain_names,
+    )
     return section_uid_to_name
 
 
@@ -1027,6 +1084,37 @@ async def recreate_evidence(
     """Re-fetch show-changes for all stored sessions and update evidence in DB."""
     logger.info(f"Recreating evidence for RITM {ritm_number} by user {session.username}")
 
+    client = await _get_recreate_cpaiops_client(session)
+
+    # Retry on database lock (SQLite WAL contention with concurrent cleanup operations)
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            return await _recreate_evidence_impl(ritm_number, session, client)
+        except OperationalError as e:
+            if "database is locked" in str(e):
+                if attempt < max_retries - 1:
+                    wait_ms = 200 * (
+                        2**attempt
+                    )  # 200ms, 400ms, 800ms, 1600ms exponential backoff
+                    logger.warning(
+                        f"Database locked during recreate-evidence (attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {wait_ms}ms..."
+                    )
+                    await asyncio.sleep(wait_ms / 1000.0)
+                    continue
+            # Not a lock error or last attempt
+            raise
+    # Should not reach here
+    raise HTTPException(status_code=500, detail="Failed to recreate evidence after retries")
+
+
+async def _recreate_evidence_impl(
+    ritm_number: str,
+    session: SessionData,
+    client: CPAIOPSClient,
+) -> EvidenceResponse:
+    """Implementation of recreate_evidence with retry wrapper."""
     async with AsyncSession(engine) as db:
         ritm_result = await db.execute(select(RITM).where(col(RITM.ritm_number) == ritm_number))
         if not ritm_result.scalar_one_or_none():
@@ -1043,80 +1131,78 @@ async def recreate_evidence(
         )
 
     try:
-        async with CPAIOPSClient(
-            engine=engine,
-            username=session.username,
-            password=session.password,
-            mgmt_ip=settings.api_mgmt,
-        ) as client:
-            mgmt_name = client.get_mgmt_names()[0]
+        mgmt_name = client.get_mgmt_names()[0]
 
-            async with AsyncSession(engine) as db:
-                for row in evidence_rows:
-                    if not row.session_uid:
-                        continue
+        async with AsyncSession(engine) as db:
+            for row in evidence_rows:
+                if not row.session_uid:
+                    continue
 
-                    sc_result = await client.api_call(
-                        mgmt_name=mgmt_name,
-                        domain=row.domain_name,
-                        command="show-changes",
-                        details_level="full",
-                        payload={"to-session": row.session_uid},
-                    )
-
-                    if sc_result.success and sc_result.data:
-                        fresh = await db.get(RITMEvidenceSession, row.id)
-                        if fresh:
-                            fresh.session_changes = json.dumps(sc_result.data)
-                    else:
-                        logger.warning(
-                            f"show-changes failed for {row.domain_name} session {row.session_uid}: "
-                            f"{sc_result.message or sc_result.code}"
-                        )
-
-                await db.commit()
-
-            # Build combined for response
-            combined: dict[str, Any] = {"domain_changes": {}, "errors": []}
-            async with AsyncSession(engine) as db:
-                refreshed_result = await db.execute(
-                    select(RITMEvidenceSession).where(
-                        col(RITMEvidenceSession.ritm_number) == ritm_number
-                    )
+                sc_result = await client.api_call(
+                    mgmt_name=mgmt_name,
+                    domain=row.domain_name,
+                    command="show-changes",
+                    details_level="full",
+                    payload={"to-session": row.session_uid},
                 )
-                for row in refreshed_result.scalars().all():
-                    sc: dict[str, Any] = {}
-                    if row.session_changes:
-                        with suppress(Exception):
-                            sc = json.loads(row.session_changes)
-                    if row.domain_name not in combined["domain_changes"]:
-                        combined["domain_changes"][row.domain_name] = {}
-                    combined["domain_changes"][row.domain_name].update(sc)
 
-            pdf_generator = get_pdf_generator()
-            domain_names = {row.domain_name for row in evidence_rows if row.domain_name}
-            section_uid_to_name = await _build_section_uid_mapping_for_domains(
-                session,
-                domain_names,
-            )
-            html = pdf_generator.generate_html(
-                ritm_number=ritm_number,
-                evidence_number=1,
-                username=session.username,
-                session_changes=combined,
-                section_uid_to_name=section_uid_to_name,
-            )
+                if sc_result.success and sc_result.data:
+                    fresh = await db.get(RITMEvidenceSession, row.id)
+                    if fresh:
+                        fresh.session_changes = json.dumps(sc_result.data)
+                else:
+                    logger.warning(
+                        f"show-changes failed for {row.domain_name} session {row.session_uid}: "
+                        f"{sc_result.message or sc_result.code}"
+                    )
 
-            return EvidenceResponse(
-                html=html,
-                yaml="",
-                changes=combined.get("domain_changes", {}),
+            await db.commit()
+
+        # Build combined for response
+        combined: dict[str, Any] = {"domain_changes": {}, "errors": []}
+        async with AsyncSession(engine) as db:
+            refreshed_result = await db.execute(
+                select(RITMEvidenceSession).where(
+                    col(RITMEvidenceSession.ritm_number) == ritm_number
+                )
             )
+            for row in refreshed_result.scalars().all():
+                sc: dict[str, Any] = {}
+                if row.session_changes:
+                    with suppress(Exception):
+                        sc = json.loads(row.session_changes)
+                if row.domain_name not in combined["domain_changes"]:
+                    combined["domain_changes"][row.domain_name] = {}
+                combined["domain_changes"][row.domain_name].update(sc)
+
+        pdf_generator = get_pdf_generator()
+        domain_names = {row.domain_name for row in evidence_rows if row.domain_name}
+        section_uid_to_name = await _build_section_uid_mapping_for_domains(
+            session,
+            domain_names,
+        )
+        html = pdf_generator.generate_html(
+            ritm_number=ritm_number,
+            evidence_number=1,
+            username=session.username,
+            session_changes=combined,
+            section_uid_to_name=section_uid_to_name,
+        )
+
+        return EvidenceResponse(
+            html=html,
+            yaml="",
+            changes=combined.get("domain_changes", {}),
+            layer_uid_to_name=section_uid_to_name,
+        )
 
     except HTTPException:
         raise
+    except OperationalError:
+        # Re-raise so retry wrapper can handle it
+        raise
     except Exception as e:
-        logger.error(f"Error in recreate_evidence for RITM {ritm_number}: {e}", exc_info=True)
+        logger.error(f"Error in _recreate_evidence_impl for RITM {ritm_number}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 

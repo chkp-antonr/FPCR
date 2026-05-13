@@ -105,12 +105,19 @@ class SessionManager:
         if datetime.now() - last_accessed > timedelta(minutes=1):
             with self._lock:
                 conn = self._get_connection()
-                conn.execute(
-                    "UPDATE sessions SET last_accessed = ? WHERE session_id = ?",
-                    (datetime.now().isoformat(), session_id),
-                )
-                conn.commit()
-                conn.close()
+                try:
+                    conn.execute(
+                        "UPDATE sessions SET last_accessed = ? WHERE session_id = ?",
+                        (datetime.now().isoformat(), session_id),
+                    )
+                    conn.commit()
+                except sqlite3.OperationalError as e:
+                    # If database is locked, skip the update and just return the session.
+                    # The session is still valid; we just skip updating the timestamp.
+                    if "locked" not in str(e).lower():
+                        raise
+                finally:
+                    conn.close()
 
         # Decrypt password
         password = self._cipher.decrypt(password_encrypted.encode()).decode()

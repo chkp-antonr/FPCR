@@ -66,10 +66,12 @@ export default function RitmEdit() {
   const [evidenceHtml, setEvidenceHtml] = useState<string | null>(null);
   const [evidenceYaml, setEvidenceYaml] = useState<string | null>(null);
   const [evidenceChanges, setEvidenceChanges] = useState<any>(null);
+  const [layerUidToName, setLayerUidToName] = useState<Record<string, string>>({});
   const [showEvidence, setShowEvidence] = useState(false);
   const [tryVerifying, setTryVerifying] = useState(false);
   const [tryVerifyResult, setTryVerifyResult] = useState<TryVerifyResponse | null>(null);
   const [canRecreateEvidence, setCanRecreateEvidence] = useState(false);
+  const [recreatingEvidence, setRecreatingEvidence] = useState(false);
   const [workflowLog, setWorkflowLog] = useState<Array<{ ts: string; text: string }>>([]);
   const [sessionHtml, setSessionHtml] = useState<string | null>(null);
   const [showSessionHtml, setShowSessionHtml] = useState(false);
@@ -674,6 +676,7 @@ export default function RitmEdit() {
     setPreCheckResult(null);
     setEvidenceYaml(null);
     setEvidenceChanges(null);
+    setLayerUidToName({});
     setShowEvidence(false);
     setTryVerifyResult(null);
     setVerificationErrors([]);
@@ -683,14 +686,16 @@ export default function RitmEdit() {
   };
 
   const handleRecreateEvidence = async () => {
-    if (!ritmNumber) return;
+    if (!ritmNumber || recreatingEvidence) return;
 
+    setRecreatingEvidence(true);
     addWorkflowLog('Re-creating evidence from current session state...');
     const hide = message.loading('Re-creating evidence...', 0);
     try {
       const response = await ritmApi.recreateEvidence(ritmNumber);
       setSessionHtml(response.html);
       setShowSessionHtml(true);
+      if (response.layer_uid_to_name) setLayerUidToName(response.layer_uid_to_name);
 
       // Also update tryVerifyResult so evidence shows in SessionChangesDisplay
       if (tryVerifyResult) {
@@ -715,6 +720,7 @@ export default function RitmEdit() {
       message.error(error.response?.data?.detail || 'Failed to re-create evidence');
     } finally {
       hide();
+      setRecreatingEvidence(false);
     }
   };
 
@@ -749,7 +755,8 @@ export default function RitmEdit() {
         })(),
         package: (() => {
           if (updatedRule.package === undefined) return existingRule.package;
-          if (!updatedRule.package) return null;
+          if (updatedRule.package === null) return null;  // Explicitly null means "clear"
+          // If package is a string, try to resolve it to package object
           const domainName = updatedRule.domain ?? existingRule.domain?.name;
           const d = domains.find(d => d.name === domainName);
           const p = d?.packages.find(p => p.name === updatedRule.package);
@@ -758,7 +765,8 @@ export default function RitmEdit() {
         })(),
         section: (() => {
           if (updatedRule.section === undefined) return existingRule.section;
-          if (!updatedRule.section) return null;
+          if (updatedRule.section === null) return null;  // Explicitly null means "clear"
+          // If section is a string, try to resolve it to section object
           const domainName = updatedRule.domain ?? existingRule.domain?.name;
           const pkgName = updatedRule.package ?? existingRule.package?.name;
           const d = domains.find(d => d.name === domainName);
@@ -1321,7 +1329,7 @@ export default function RitmEdit() {
                   ))}
 
                   {canRecreateEvidence && (
-                    <Button size="small" onClick={handleRecreateEvidence}>
+                    <Button size="small" onClick={handleRecreateEvidence} disabled={recreatingEvidence} loading={recreatingEvidence}>
                       Re-create Evidence
                     </Button>
                   )}
@@ -1400,6 +1408,8 @@ export default function RitmEdit() {
                         <Button
                           size="small"
                           onClick={handleRecreateEvidence}
+                          disabled={recreatingEvidence}
+                          loading={recreatingEvidence}
                         >Regenerate Evidence</Button>
                         <Button
                           size="small"
@@ -1412,7 +1422,7 @@ export default function RitmEdit() {
                     ),
                     children: (
                       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                        <SessionChangesDisplay sessionChanges={tryVerifyResult.session_changes} />
+                        <SessionChangesDisplay sessionChanges={tryVerifyResult.session_changes} domains={domains} layerUidToName={layerUidToName} />
                         {showSessionHtml && sessionHtml && (
                           <iframe
                             title="Evidence HTML Preview"
@@ -1482,19 +1492,20 @@ export default function RitmEdit() {
 }
 
 // Component to display session changes in visual format
-function SessionChangesDisplay({ sessionChanges }: { sessionChanges: any }) {
+function SessionChangesDisplay({ sessionChanges, domains, layerUidToName }: { sessionChanges: any; domains: DomainInfo[]; layerUidToName?: Record<string, string> }) {
+  const resolvedLayerMap = layerUidToName ?? {};
   if (!sessionChanges) return null;
 
   const domainChanges = sessionChanges.domain_changes || {};
-  const domains = Object.keys(domainChanges);
+  const domainNames = Object.keys(domainChanges);
 
-  if (domains.length === 0) {
+  if (domainNames.length === 0) {
     return <Text type="secondary">No changes recorded</Text>;
   }
 
   return (
     <div style={{ fontSize: '0.9em' }}>
-      {domains.map((domainName) => {
+      {domainNames.map((domainName) => {
         const domainData = domainChanges[domainName];
         const tasks = domainData.tasks || [];
 
@@ -1615,7 +1626,34 @@ function SessionChangesDisplay({ sessionChanges }: { sessionChanges: any }) {
                       const value = getString(candidate);
                       if (value) return value;
                     }
+
+                    // Fallback: use layer identity as a stable package bucket.
+                    const layerUid = getString(rule.layer?.uid);
+                    if (layerUid) return `Layer:${layerUid}`;
+
+                    const layerRaw = getString(rule.layer);
+                    if (layerRaw) {
+                      if (looksLikeUid(layerRaw)) {
+                        return `Layer:${layerRaw}`;
+                      }
+                      return layerRaw;
+                    }
+
                     return 'Standard';
+                  };
+
+                  const formatPackageLabel = (pkg: string, currentDomainName: string): string => {
+                    if (pkg.startsWith('Layer:')) {
+                      const layerUid = pkg.slice('Layer:'.length);
+                      // Try backend-resolved mapping first
+                      if (resolvedLayerMap[layerUid]) return resolvedLayerMap[layerUid];
+                      // Try matching by access_layer in loaded domain packages
+                      const domainInfo = domains.find((d) => d.name === currentDomainName);
+                      const pkgByLayer = domainInfo?.packages.find((p) => p.access_layer === layerUid);
+                      if (pkgByLayer?.name) return pkgByLayer.name;
+                      return `Unknown package (layer ${layerUid})`;
+                    }
+                    return pkg;
                   };
 
                   const resolveSectionName = (rule: any): string => {
@@ -1635,7 +1673,12 @@ function SessionChangesDisplay({ sessionChanges }: { sessionChanges: any }) {
                     for (const candidate of candidates) {
                       const value = getString(candidate);
                       if (!value) continue;
-                      if (!looksLikeUid(value)) return value;
+                      // Try resolving UID via backend mapping
+                      if (looksLikeUid(value)) {
+                        if (resolvedLayerMap[value]) return resolvedLayerMap[value];
+                        continue;
+                      }
+                      return value;
                     }
 
                     return 'Rules';
@@ -1699,7 +1742,7 @@ function SessionChangesDisplay({ sessionChanges }: { sessionChanges: any }) {
                                     marginBottom: 6,
                                   }}
                                 >
-                                  Package: {packageName}
+                                  Package: {formatPackageLabel(packageName, domainName)}
                                 </div>
 
                                 <table

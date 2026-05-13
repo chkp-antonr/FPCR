@@ -109,6 +109,7 @@ async def list_sections(
 
     Returns cached data. Refreshes the selected package sections on demand if needed.
     """
+    logger.info(f"Sections request for domain={domain_uid}, package={pkg_uid}")
     mock_data_path = os.getenv("MOCK_DATA")
     if mock_data_path:
         mock = MockDataSource(mock_data_path)
@@ -129,6 +130,9 @@ async def list_sections(
     # Try cache first
     cached = await cache_service.get_cached_sections(domain_uid, pkg_uid)
     if cached:
+        logger.info(
+            f"Returning {len(cached)} cached sections for domain={domain_uid}, package={pkg_uid}"
+        )
         total_rules = sum(s.rule_count for s in cached)
         return {
             "sections": [
@@ -144,6 +148,7 @@ async def list_sections(
         }
 
     # Cache empty for this package - refresh it immediately and let the rest continue in background.
+    logger.info(f"Cache empty for domain={domain_uid}, package={pkg_uid}; refreshing...")
     if not session:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -160,7 +165,10 @@ async def list_sections(
     )
 
     cached = await cache_service.get_cached_sections(domain_uid, pkg_uid)
-    total_rules = sum(s.rule_count for s in cached)
+    total_rules = sum(s.rule_count for s in cached) if cached else 0
+    logger.info(
+        f"After refresh: {len(cached) if cached else 0} sections for domain={domain_uid}, package={pkg_uid}"
+    )
     return {
         "sections": [
             {
@@ -170,6 +178,8 @@ async def list_sections(
                 "rule_count": s.rule_count,
             }
             for s in cached
-        ],
+        ]
+        if cached
+        else [],
         "total_rules": total_rules,
     }

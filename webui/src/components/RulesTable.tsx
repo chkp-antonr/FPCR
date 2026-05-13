@@ -17,9 +17,9 @@ export interface Rule {
   dest_ips?: string[];
   service?: string[];
   services?: string[];
-  domain?: string;
-  package?: string;
-  section?: string;
+  domain?: string | null;
+  package?: string | null;
+  section?: string | null;
   action?: string;
   track?: string;
   position?: string;
@@ -86,37 +86,37 @@ const RulesTable: React.FC<RulesTableProps> = ({
   };
 
   // Handle domain change
-  const handleDomainChange = (value: string, rule: Rule) => {
+  const handleDomainChange = (value: string | undefined, rule: Rule) => {
     const updatedRule = {
       ...rule,
-      domain: value,
-      package: undefined,
-      section: undefined,
+      domain: value ?? null,
+      package: null,
+      section: null,
     };
     updateRule(updatedRule);
-    if (onFetchPackages) {
+    if (onFetchPackages && value) {
       onFetchPackages(value, rule);
     }
   };
 
   // Handle package change
-  const handlePackageChange = (value: string, rule: Rule) => {
+  const handlePackageChange = (value: string | undefined, rule: Rule) => {
     const updatedRule = {
       ...rule,
-      package: value,
-      section: undefined,
+      package: value ?? null,
+      section: null,
     };
     updateRule(updatedRule);
-    if (onFetchSections && rule.domain) {
+    if (onFetchSections && rule.domain && value) {
       onFetchSections(rule.domain, value, rule);
     }
   };
 
   // Handle section change
-  const handleSectionChange = (value: string, rule: Rule) => {
+  const handleSectionChange = (value: string | undefined, rule: Rule) => {
     const updatedRule = {
       ...rule,
-      section: value,
+      section: value ?? null,
     };
     updateRule(updatedRule);
   };
@@ -371,7 +371,7 @@ const RulesTable: React.FC<RulesTableProps> = ({
                         onClick={(e) => {
                           e.stopPropagation();
                           // Clear package selection before reloading
-                          updateRule({ ...record, package: undefined });
+                          updateRule({ ...record, package: null, section: null });
                           if (onFetchPackages && record.domain) {
                             onFetchPackages(record.domain, record);
                           }
@@ -397,7 +397,7 @@ const RulesTable: React.FC<RulesTableProps> = ({
                 onClick={(e) => {
                   e.stopPropagation();
                   // Clear package selection before reloading
-                  updateRule({ ...record, package: undefined });
+                  updateRule({ ...record, package: null, section: null });
                   if (onFetchPackages) {
                     onFetchPackages(record.domain!, record);
                   }
@@ -453,7 +453,7 @@ const RulesTable: React.FC<RulesTableProps> = ({
                         onClick={(e) => {
                           e.stopPropagation();
                           // Clear section selection before reloading
-                          updateRule({ ...record, section: undefined });
+                          updateRule({ ...record, section: null });
                           if (onFetchSections && record.domain && record.package) {
                             onFetchSections(record.domain, record.package, record);
                           }
@@ -492,7 +492,7 @@ const RulesTable: React.FC<RulesTableProps> = ({
                 onClick={(e) => {
                   e.stopPropagation();
                   // Clear section selection before reloading
-                  updateRule({ ...record, section: undefined });
+                  updateRule({ ...record, section: null });
                   if (onFetchSections && record.domain && record.package) {
                     onFetchSections(record.domain, record.package, record);
                   }

@@ -28,6 +28,7 @@ def _configure_sqlite(dbapi_connection: sqlite3.Connection, _connection_record: 
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA busy_timeout=10000")  # 10 seconds for lock contention (with retries)
     cursor.close()
 
 

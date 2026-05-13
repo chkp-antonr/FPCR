@@ -524,8 +524,14 @@ class SessionChangesPDFGenerator:
         def _data_row(rule: dict[str, Any]) -> list[Any]:
             src_items = rule.get("source_items")
             dst_items = rule.get("dest_items")
-            src_text = _render_ref_items(src_items) if src_items else ", ".join(rule.get("source", []))
-            dst_text = _render_ref_items(dst_items) if dst_items else ", ".join(rule.get("destination", []))
+            src_text = (
+                _render_ref_items(src_items) if src_items else ", ".join(rule.get("source", []))
+            )
+            dst_text = (
+                _render_ref_items(dst_items)
+                if dst_items
+                else ", ".join(rule.get("destination", []))
+            )
             return [
                 Paragraph(str(rule.get("rule_number", "") or ""), cell_style),
                 Paragraph(rule.get("name", ""), cell_style),
@@ -931,8 +937,12 @@ class SessionChangesPDFGenerator:
                                     for r in new_refs
                                     if r.get("name") or r.get("uid")
                                 ]
-                            old_uids: set[str] = {r.get("uid", "") for r in old_refs if r.get("uid")}
-                            new_uids: set[str] = {r.get("uid", "") for r in new_refs if r.get("uid")}
+                            old_uids: set[str] = {
+                                r.get("uid", "") for r in old_refs if r.get("uid")
+                            }
+                            new_uids: set[str] = {
+                                r.get("uid", "") for r in new_refs if r.get("uid")
+                            }
                             items: list[dict[str, str]] = []
                             for r in new_refs:
                                 name = html.escape(r.get("name") or r.get("uid", ""))
@@ -959,14 +969,24 @@ class SessionChangesPDFGenerator:
                         modified_non_rules: list[dict[str, Any]] = []
                         modified_rule_scan_refs: list[dict[str, Any]] = []
                         for entry in modified_objects:
-                            new_obj = entry.get("new-object") if isinstance(entry.get("new-object"), dict) else None
-                            old_obj = entry.get("old-object") if isinstance(entry.get("old-object"), dict) else None
+                            new_obj = (
+                                entry.get("new-object")
+                                if isinstance(entry.get("new-object"), dict)
+                                else None
+                            )
+                            old_obj = (
+                                entry.get("old-object")
+                                if isinstance(entry.get("old-object"), dict)
+                                else None
+                            )
                             if new_obj is None:
                                 if isinstance(entry, dict) and entry.get("type") != "access-rule":
                                     modified_non_rules.append(entry)
                                 continue
                             if new_obj.get("type") == "access-rule":
-                                install_on = new_obj.get("install-on") or new_obj.get("install_on") or []
+                                install_on = (
+                                    new_obj.get("install-on") or new_obj.get("install_on") or []
+                                )
                                 mod_targets: list[str] = []
                                 if isinstance(install_on, list):
                                     for target in install_on:

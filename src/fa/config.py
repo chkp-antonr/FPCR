@@ -45,7 +45,7 @@ class WebUISettings(BaseSettings):
     radius_timeout: int = 5
 
     # FPCR Create & Verify flow settings
-    initials_csv_path: str = "_tmp/FWTeam_admins.csv"
+    initials_csv_path: str = "./FWTeam_admins.csv"
     evidence_template_dir: str = "src/fa/templates"
     pdf_render_timeout: int = 30
 

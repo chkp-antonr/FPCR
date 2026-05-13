@@ -1,5 +1,6 @@
 """FastAPI application factory."""
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -20,7 +21,7 @@ from .cache_service import cache_service
 from .config import settings
 from .db import create_ritm_flow_tables, dispose_engine, engine
 from .routes import auth_router, domains_router, health_router, packages_router, ritm_router
-from .routes.ritm_flow import router as ritm_flow_router
+from .routes.ritm_flow import close_ritm_flow_clients, router as ritm_flow_router
 
 # Initialize arlogi logging before importing anything else
 log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -96,10 +97,27 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await init_database()
     await create_ritm_flow_tables()
     logger.info("RITM flow tables created")
+
     yield
     # Shutdown
-    await cache_service.shutdown()
-    await dispose_engine()
+    try:
+        async with asyncio.timeout(10):
+            await cache_service.shutdown()
+    except TimeoutError:
+        logger.warning("cache_service.shutdown() timed out after 10 seconds")
+
+    try:
+        async with asyncio.timeout(10):
+            await close_ritm_flow_clients()
+    except TimeoutError:
+        logger.warning("close_ritm_flow_clients() timed out after 10 seconds")
+
+    try:
+        async with asyncio.timeout(10):
+            await dispose_engine()
+    except TimeoutError:
+        logger.warning("dispose_engine() timed out after 10 seconds")
+
     print("FPCR WebUI shutting down")
 
 

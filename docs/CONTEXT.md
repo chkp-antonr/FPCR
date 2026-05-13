@@ -213,6 +213,14 @@ This file serves as a directory for AI assistants to find relevant research, pla
   * `src/fa/services/session_changes_pdf.py` - Updated to accept and use UID mapping
   * `src/fa/app.py` - Added arlogi `setup_logging()` initialization
 
+### 2026-05-13: RITM Workflow Guide (Current Procedure)
+
+* **Topic**: Comprehensive, up-to-date reference for the RITM lifecycle as currently implemented.
+* **Status**: ✅ Complete
+* **Tracked Results**: `docs/internal/features/260513-ritm-workflow-guide/RITM_WORKFLOW.md`
+* **Raw Logs (Ignored)**: `docs/_AI_/2605/260513-RITM_flow_doc/`
+* **Summary**: Documents current RITM workflow including state machine (WORK_IN_PROGRESS → READY_FOR_APPROVAL → APPROVED → COMPLETED), editor/approver separation-of-duties guardrails, Try & Verify per-package attempt states, Mermaid sequence diagram covering rejection and correction cycles, and evidence session structure (no consolidation, session grouping only). Supersedes the older `260423-ritm-evidence-tracking/ritm-flow.md`.
+
 ### 2026-05-08: RITM Correction Attempt — Rule Dedup & Diff Display
 
 * **Topic**: Rule deduplication on re-submission, blank evidence fix, source/dest diff display.

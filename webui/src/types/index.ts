@@ -357,6 +357,7 @@ export interface EvidenceResponse {
   html: string;
   yaml: string;
   changes: Record<string, unknown>;
+  layer_uid_to_name?: Record<string, string>;
 }
 
 export interface EvidenceSessionItem {

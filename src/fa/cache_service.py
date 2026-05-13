@@ -493,12 +493,22 @@ class CacheService:
         lock = await self._get_package_refresh_lock(context.domain_uid, context.package_uid)
         if lock.locked():
             logger.info(
-                "Section refresh already in progress for domain=%s package=%s; waiting",
+                "Section refresh already in progress for domain=%s package=%s; waiting (timeout=15s)",
                 context.domain_name,
                 context.package_name,
             )
-            async with lock:
-                return
+            try:
+                # Wait for the lock with a 15-second timeout
+                async with asyncio.timeout(15):
+                    async with lock:
+                        return
+            except TimeoutError:
+                logger.warning(
+                    "Timeout waiting for section refresh lock for domain=%s package=%s; proceeding anyway",
+                    context.domain_name,
+                    context.package_name,
+                )
+                # Proceed without the lock - the other task may have stalled
 
         async with lock:
             sections = await self._fetch_sections_from_api(client, mgmt_name, context)
@@ -610,6 +620,25 @@ class CacheService:
         sections: list[dict[str, Any]] = []
         current_rule = 1
 
+        def _as_int(value: Any) -> int | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                value = value.strip()
+                if value.isdigit():
+                    return int(value)
+            return None
+
+        def _pick_int(obj: dict[str, Any], keys: list[str]) -> int | None:
+            for key in keys:
+                if key in obj:
+                    parsed = _as_int(obj.get(key))
+                    if parsed is not None:
+                        return parsed
+            return None
+
         rulebase = layer_result.objects
         if not rulebase and isinstance(layer_result.data, dict):
             rulebase = layer_result.data.get("rulebase", [])
@@ -620,11 +649,46 @@ class CacheService:
             if not isinstance(rule, dict):
                 continue
             if rule.get("type") != "access-section":
+                # Keep cursor aligned with top-level rule numbering when available.
+                top_rule_num = _pick_int(rule, ["rule-number", "rule_number", "number"])
+                if top_rule_num is not None:
+                    current_rule = max(current_rule, top_rule_num + 1)
                 continue
 
             section_rules = rule.get("rulebase", [])
-            section_min = current_rule
-            section_max = current_rule + len(section_rules) - 1
+
+            # Prefer explicit section bounds from API if present.
+            section_min = _pick_int(rule, ["from", "from-rule", "from_rule"])
+            section_max = _pick_int(rule, ["to", "to-rule", "to_rule"])
+
+            # Fallback: infer bounds from nested rule numbers.
+            if section_min is None or section_max is None:
+                nested_nums: list[int] = []
+                if isinstance(section_rules, list):
+                    for nested_rule in section_rules:
+                        if isinstance(nested_rule, dict):
+                            nested_num = _pick_int(
+                                nested_rule,
+                                ["rule-number", "rule_number", "number"],
+                            )
+                            if nested_num is not None:
+                                nested_nums.append(nested_num)
+                if nested_nums:
+                    section_min = min(nested_nums)
+                    section_max = max(nested_nums)
+
+            # Last fallback: sequential approximation.
+            if section_min is None or section_max is None:
+                section_min = current_rule
+                if isinstance(section_rules, list) and len(section_rules) > 0:
+                    section_max = current_rule + len(section_rules) - 1
+                else:
+                    # Empty sections must still advance cursor to avoid duplicate ranges.
+                    section_max = section_min
+
+            if section_max < section_min:
+                section_max = section_min
+
             sections.append(
                 {
                     "uid": rule.get("uid", ""),
